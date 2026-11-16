@@ -15,18 +15,15 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         "GPHOTOS_SESSION",
         "inspect PHOTO_ID",
         "auth export",
-        "session stays valid",
+        "EXAMPLES:",
+        "FIRST-TIME SETUP",
+        "SAFETY:",
         "help search",
         "--all",
         "--from",
     ] {
         assert!(text.contains(phrase), "missing {phrase}");
     }
-    assert!(
-        text.find("google-photos-web-cli search \"birthday cake\"")
-            .unwrap()
-            < text.find("ADVANCED SEARCH OPTIONS:").unwrap()
-    );
     for command in [
         vec!["help", "search"],
         vec!["auth", "chrome", "--help"],
@@ -89,6 +86,7 @@ fn detailed_help_documents_filters_pagination_metadata_and_session_refresh() {
             vec!["help", "search"],
             vec![
                 "Advanced filters:",
+                "Examples:",
                 "ADVANCED SEARCH OPTIONS:",
                 "google-photos-web-cli search \"birthday cake\"",
                 "--page-token",
@@ -142,4 +140,41 @@ fn detailed_help_documents_filters_pagination_metadata_and_session_refresh() {
             assert!(text.contains(phrase), "help missing {phrase}");
         }
     }
+}
+
+fn bin() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("google-photos-web-cli"))
+}
+
+#[test]
+fn short_long_and_help_subcommand_give_identical_top_level_help() {
+    let help = |args: &[&str]| bin().args(args).output().unwrap().stdout;
+    let long = help(&["--help"]);
+    assert!(!long.is_empty());
+    assert_eq!(long, help(&["-h"]));
+    assert_eq!(long, help(&["help"]));
+    let text = String::from_utf8(long).unwrap();
+    assert!(text.contains("EXAMPLES:"));
+    assert_eq!(text.matches("Usage:").count(), 1);
+}
+
+#[test]
+fn bare_invocation_shows_help_and_keeps_failure_exit_code() {
+    let out = bin().output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("EXAMPLES:"));
+}
+
+#[test]
+fn mistakes_point_to_command_help() {
+    let out = bin().args(["auth", "export"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("google-photos-web-cli auth export --help"),
+        "{err}"
+    );
+    let out = bin().arg("bogus").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("--help"));
 }

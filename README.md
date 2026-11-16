@@ -365,16 +365,32 @@ refreshing an expired local Chrome session.
 
 ## Help
 
-Help works offline and never reads session credentials.
+Help works offline and never reads session credentials. Every command has an
+`Examples:` section and documents every flag.
 
 ```bash
-google-photos-web-cli help
-google-photos-web-cli help search
-google-photos-web-cli help inspect
+google-photos-web-cli              # same as --help: setup, commands, examples
+google-photos-web-cli help search  # or: google-photos-web-cli search --help
 google-photos-web-cli help tag
 google-photos-web-cli help auth export
-google-photos-web-cli help auth import
 ```
+
+Quick examples (placeholder values):
+
+```bash
+google-photos-web-cli auth chrome                       # macOS; any OS: auth cookies cookies.txt
+google-photos-web-cli auth status
+google-photos-web-cli search "birthday cake"
+google-photos-web-cli search --person "Jane Doe" --from 2026-10-01 --to 2026-10-31
+google-photos-web-cli search beach --all --json > results.json
+google-photos-web-cli inspect AF1QipExamplePhotoId --json
+google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
+google-photos-web-cli tag AF1QipExamplePhotoId --face 0 --person "Jane Doe" --dry-run
+```
+
+Exit codes: 0 success, 1 runtime error, 2 bad command line (the error ends with
+a pointer to the relevant `--help`). Only `tag` changes your library; preview it
+with `--dry-run`.
 
 | Command | Purpose |
 | --- | --- |

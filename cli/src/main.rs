@@ -7,61 +7,58 @@ use google_photos_web_cli::{
 };
 use std::path::PathBuf;
 
-const EXAMPLES: &str = "GET STARTED:
-  macOS Chrome:   google-photos-web-cli auth chrome
-  Any platform:   google-photos-web-cli auth cookies /path/to/cookies.txt
-  Other machine:  google-photos-web-cli auth import /path/to/session.env
+const EXAMPLES: &str = r#"google-photos-web-cli: search, inspect and download your Google Photos from the terminal.
+Unofficial (not affiliated with Google). It reuses your browser sign-in; no API key needed.
 
-SEARCH LIKE GOOGLE PHOTOS:
-  google-photos-web-cli search \"birthday cake\"
-  google-photos-web-cli search \"Philadelphia October 2026\"
-  google-photos-web-cli search \"Emma and Lucy at the beach\"
+Usage: google-photos-web-cli [--session-file PATH] <COMMAND> [ARGS]
 
-Enter one phrase with names, places, dates, or objects. Google interprets it
-like a search in the browser. Run 'google-photos-web-cli help search' for more options.
-
-ADVANCED SEARCH OPTIONS:
-  google-photos-web-cli search --person \"Emma Example\" --person \"Lucy Example\"
-  google-photos-web-cli search --from 2026-10-01 --to 2026-10-31
-  google-photos-web-cli search \"birthday cake\" --all --limit 100 --json
-
-PHOTO METADATA AND DOWNLOAD:
-  google-photos-web-cli inspect PHOTO_ID --json
-  google-photos-web-cli download PHOTO_ID --dir ./photos
-
-TAG A FACE (the only command that changes your library):
-  google-photos-web-cli tag PHOTO_ID --face 0 --person \"Emma Example\" --dry-run
-  google-photos-web-cli help inspect
-  google-photos-web-cli help search
-
-PORTABLE AUTHENTICATION:
-  google-photos-web-cli auth export --output session.env
-  google-photos-web-cli auth import session.env
+FIRST-TIME SETUP (sign in once, then check it worked):
+  google-photos-web-cli auth chrome                      macOS: import your Chrome sign-in
+  google-photos-web-cli auth cookies cookies.txt         any OS: import an exported cookies.txt
   google-photos-web-cli auth status
-  google-photos-web-cli help auth
+The session is saved to a private .env in your config directory
+(change it with --session-file PATH or the GPHOTOS_SESSION_FILE variable).
 
-One GPHOTOS_SESSION value stores the cookie bundle in a private .env file.
-Searches can reimport an expired local Chrome session on macOS.
-This is not a permanent Google API token:
-there is no reliable single lifetime or supported OAuth refresh token. Google
-can expire/revoke it before individual cookies expire. Browser use does not
-ensure the imported session stays valid. Sign in in your browser and reimport
-fresh cookies/session data when authentication fails; export a fresh copy for
-other machines. Use --session-file PATH to select a different private file.
+COMMANDS:
+  Sign in
+    auth chrome             Import Chrome cookies (macOS)
+    auth cookies FILE       Import a Netscape cookies.txt (any OS)
+    auth import FILE        Import a session file made by 'auth export'
+    auth export             Export the session to move it to another machine
+    auth status             Check the saved session (never prints it)
+    auth logout, logout     Delete the saved session
+    auth migrate-keychain   One-time upgrade from version 0.1 (macOS)
+  Read (never changes your library)
+    search [QUERY]          Search by text, people, place, dates; optionally download
+    people                  List face groups (people) and their IDs
+    inspect PHOTO_ID        Show a photo's metadata and detected faces
+    download PHOTO_ID       Save the full-size original
+  Change (writes to your library)
+    tag PHOTO_ID            Tag a detected face with an existing person
 
-Text queries, locations, content/tag phrases and free-form dates go to Google's
-search. Explicit --from/--to bounds are verified against capture-date metadata.
-Repeated --person filters require ALL selected face-group IDs in the same photo.
---sort selects relevant or recent results. --all raises paging and scan limits.
-Partial results have complete=false, stop_reason, and next_page_token.
+EXAMPLES:
+  google-photos-web-cli search "birthday cake"
+  google-photos-web-cli search "Paris October 2026" --limit 50
+  google-photos-web-cli search --person "Jane Doe" --from 2026-10-01 --to 2026-10-31
+  google-photos-web-cli search beach --all --json > results.json
+  google-photos-web-cli people --name Jane
+  google-photos-web-cli inspect AF1QipExamplePhotoId --json
+  google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
+  google-photos-web-cli tag AF1QipExamplePhotoId --face 0 --person "Jane Doe" --dry-run
 
-Unofficial project; not affiliated with Google. Only 'google-photos-web-cli tag' modifies
-Google Photos; every other command is read-only. Run 'google-photos-web-cli help COMMAND' for full details.";
+MORE HELP:  google-photos-web-cli <command> --help   (or: help <command>, e.g. help search)
+OUTPUT:     readable text by default; --json on search, people, inspect, download,
+            tag and auth status gives JSON on stdout (progress and errors go to stderr).
+SAFETY:     only 'tag' changes your library; add --dry-run to preview it first.
+            Downloads never overwrite files. 'auth export' prints credentials:
+            treat the result like a password. Sessions can expire or be revoked by
+            Google; if a command says so, sign in again (auth chrome / auth cookies).
+Exit code 0 = success, 1 = runtime error, 2 = bad command line."#;
 
 #[derive(Parser)]
-#[command(name="google-photos-web-cli", version, about="Search and download your Google Photos from the terminal", long_about="Unofficial Google Photos CLI. Reuse your Chrome session, search your existing library, and download full-size media. Portable cookie/session import supports macOS, Linux, and Windows. Direct Chrome import currently supports macOS.", after_help=EXAMPLES)]
+#[command(name = "google-photos-web-cli", version, about = "Search, inspect and download your Google Photos from the terminal", arg_required_else_help = true, help_template = "{after-help}", after_help = EXAMPLES)]
 struct Cli {
-    /// Session .env path (default: your platform's config directory/google-photos-web-cli/.env)
+    /// Session file to use [default: <config dir>/google-photos-web-cli/.env]
     #[arg(long, global = true, env = "GPHOTOS_SESSION_FILE")]
     session_file: Option<PathBuf>,
     #[command(subcommand)]
@@ -71,25 +68,26 @@ struct Cli {
 enum Command {
     /// Import, check, refresh, or remove the locally saved session
     #[command(
-        after_help = "SESSION LIFETIME AND REFRESH:\n  google-photos-web-cli auth status\n\nNo single guaranteed expiry exists: GPHOTOS_SESSION packages several cookies.\nGoogle can revoke it before their expiry dates. There is no supported OAuth\nrefresh token for this method. Normal commands persist returned cookie updates\nto the selected .env file, but cannot renew a revoked Google login.\n\nOn macOS, search retries once after refreshing an expired session saved by\ngphotos auth chrome. Chrome must still be signed into the same account.\n\nIf automatic refresh is unavailable or fails:\n  1. Sign in / complete any verification at photos.google.com in your browser.\n  2. macOS: google-photos-web-cli auth chrome; any OS: google-photos-web-cli auth cookies /path/to/cookies.txt\n  3. google-photos-web-cli auth status\n  4. google-photos-web-cli auth export --output new-session.env\n     On another machine: google-photos-web-cli auth import new-session.env\n\nExport destinations must be new files; existing exports are not overwritten."
+        after_help = "Examples:\n  google-photos-web-cli auth chrome\n  google-photos-web-cli auth cookies cookies.txt\n  google-photos-web-cli auth status\n  google-photos-web-cli auth export --output session.env\n\nSESSION LIFETIME AND REFRESH:\n\nNo single guaranteed expiry exists: GPHOTOS_SESSION packages several cookies.\nGoogle can revoke it before their expiry dates. There is no supported OAuth\nrefresh token for this method. Normal commands persist returned cookie updates\nto the selected .env file, but cannot renew a revoked Google login.\n\nOn macOS, search retries once after refreshing an expired session saved by\ngphotos auth chrome. Chrome must still be signed into the same account.\n\nIf automatic refresh is unavailable or fails:\n  1. Sign in / complete any verification at photos.google.com in your browser.\n  2. macOS: google-photos-web-cli auth chrome; any OS: google-photos-web-cli auth cookies /path/to/cookies.txt\n  3. google-photos-web-cli auth status\n  4. google-photos-web-cli auth export --output new-session.env\n     On another machine: google-photos-web-cli auth import new-session.env\n\nExport destinations must be new files; existing exports are not overwritten.\nRun 'google-photos-web-cli auth <subcommand> --help' for details on each."
     )]
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
     },
     /// Search Google's text, people, places, dates, and content; paginate long lists
-    #[command(after_help = r#"SEARCH LIKE GOOGLE PHOTOS:
+    #[command(after_help = r#"Examples:
   google-photos-web-cli search "birthday cake"
-  google-photos-web-cli search "Philadelphia October 2026"
-  google-photos-web-cli search "Emma and Lucy at the beach"
+  google-photos-web-cli search "Paris October 2026"
+  google-photos-web-cli search "Jane Doe and John Roe at the beach"
+  google-photos-web-cli search "birthday cake" --download ./photos
 
 Enter one phrase with names, places, dates, or objects. Google interprets it
 like a search in the browser. --location and --tag add text to that same query.
 
 ADVANCED SEARCH OPTIONS:
-  google-photos-web-cli search --person "Emma Example" --person "Lucy Example"
+  google-photos-web-cli search --person "Jane Doe" --person "John Roe"
   google-photos-web-cli search --from 2026-10-01 --to 2026-10-31
-  google-photos-web-cli search beach --person "Emma Example" --from 2026-10-01
+  google-photos-web-cli search beach --person "Jane Doe" --from 2026-10-01
 
 Repeat --person and/or --person-id to require every selected face group in the
 same photo. Names must resolve uniquely. Use full names to disambiguate them.
@@ -117,6 +115,9 @@ candidates_checked, complete, stop_reason, and next_page_token.
 --download DIRECTORY downloads displayed matches without changing the library."#)]
     Search(SearchArgs),
     /// List Google's returned face groups and their IDs (named groups by default)
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli people\n  google-photos-web-cli people --name Jane\n  google-photos-web-cli people --include-unnamed --json\n\nUse the IDs with 'search --person-id' and 'tag --person-id'. Read-only."
+    )]
     People {
         /// Filter names by case-insensitive substring
         #[arg(long)]
@@ -124,30 +125,36 @@ candidates_checked, complete, stop_reason, and next_page_token.
         /// Include unnamed face groups
         #[arg(long)]
         include_unnamed: bool,
+        /// Print machine-readable JSON instead of a table
         #[arg(long)]
         json: bool,
     },
     /// Show full available photo metadata: filename, camera/lens, coordinates, dates, caption, people
     #[command(
         alias = "get",
-        after_help = "EXAMPLES:\n  google-photos-web-cli inspect PHOTO_ID\n  google-photos-web-cli inspect PHOTO_ID --json\n  google-photos-web-cli get PHOTO_ID --json\n\nJSON includes filename, caption (also description), taken_at and uploaded_at\nwith timezone, dimensions, file size, camera make/model, lens when supplied,\nfocal length, aperture, ISO, exposure time, latitude/longitude, location labels,\nGoogle-tagged people, every detected face (index, box, assigned face group),\nalbums, source and storage attributes. Missing fields\nremain null. people_status=not_returned does not mean nobody is in the image.\nFaces are indexed left to right; use the index with 'google-photos-web-cli tag'.\nThis is Google's available metadata, not a promise of every possible EXIF tag."
+        after_help = "Examples:\n  google-photos-web-cli inspect AF1QipExamplePhotoId\n  google-photos-web-cli inspect AF1QipExamplePhotoId --json\n  google-photos-web-cli get AF1QipExamplePhotoId --json   # 'get' is an alias\n\nRead-only. PHOTO_ID comes from 'google-photos-web-cli search'.\n\nJSON includes filename, caption (also description), taken_at and uploaded_at\nwith timezone, dimensions, file size, camera make/model, lens when supplied,\nfocal length, aperture, ISO, exposure time, latitude/longitude, location labels,\nGoogle-tagged people, every detected face (index, box, assigned face group),\nalbums, source and storage attributes. Missing fields\nremain null. people_status=not_returned does not mean nobody is in the image.\nFaces are indexed left to right; use the index with 'google-photos-web-cli tag'.\nThis is Google's available metadata, not a promise of every possible EXIF tag."
     )]
     Inspect {
+        /// Photo/media ID from 'google-photos-web-cli search' (not the filename or URL)
         id: String,
+        /// Print machine-readable JSON (includes face_id values for 'tag')
         #[arg(long)]
         json: bool,
     },
     /// Download full-size media by the ID returned from search
     #[command(
-        after_help = "EXAMPLES:\n  google-photos-web-cli download PHOTO_ID --dir ./photos\n  google-photos-web-cli download PHOTO_ID --output ./vacation.jpg --json\n\nPrefers Google's original download URL; otherwise uses its full-size URL.\nJSON reports 'original' or 'full-size', byte count, SHA-256, and saved path.\nNever downloads a thumbnail or overwrites an existing file.\nGoogle's stored version may differ from the file originally uploaded if\nStorage Saver was used. Live Photo motion components are not exported separately."
+        after_help = "Examples:\n  google-photos-web-cli download AF1QipExamplePhotoId\n  google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos\n  google-photos-web-cli download AF1QipExamplePhotoId --output ./vacation.jpg --json\n\n--output and --dir cannot be combined. Read-only for your library.\n\nPrefers Google's original download URL; otherwise uses its full-size URL.\nJSON reports 'original' or 'full-size', byte count, SHA-256, and saved path.\nNever downloads a thumbnail or overwrites an existing file.\nGoogle's stored version may differ from the file originally uploaded if\nStorage Saver was used. Live Photo motion components are not exported separately."
     )]
     Download(DownloadArgs),
     /// Tag a detected face in a photo with an existing named person (writes to your library)
-    #[command(after_help = r#"EXAMPLES:
-  google-photos-web-cli inspect PHOTO_ID                 # list faces: index, box, tagged person
-  google-photos-web-cli tag PHOTO_ID --face 1 --person "Emma Example" --dry-run
-  google-photos-web-cli tag PHOTO_ID --face 1 --person "Emma Example"
-  google-photos-web-cli tag PHOTO_ID --face-id FACE_ID --person-id GROUP_ID --json
+    #[command(
+        after_help = r#"Examples (WRITES to your library unless --dry-run; this CLI has no undo):
+  google-photos-web-cli inspect AF1QipExamplePhotoId       # 1. list faces: index, box, tagged person
+  google-photos-web-cli tag AF1QipExamplePhotoId --face 1 --person "Jane Doe" --dry-run   # 2. preview
+  google-photos-web-cli tag AF1QipExamplePhotoId --face 1 --person "Jane Doe"             # 3. apply
+  google-photos-web-cli tag AF1QipExamplePhotoId --face-id FACE_ID --person-id GROUP_ID --json
+
+You must give one of --face/--face-id AND one of --person/--person-id.
 
 Assigns one detected face to an existing face group, like Info > People >
 Edit faces > Add > (person) > Done on photos.google.com. --face is the index
@@ -159,16 +166,20 @@ same rules as 'search --person'); --person-id must be an ID from 'google-photos-
 A face that is already tagged is refused unless --force; a face already tagged
 with the same person is left unchanged. New people cannot be created here.
 --dry-run prints the exact request without sending it. Nothing is retried
-automatically, and the change is confirmed from Google's response."#)]
+automatically, and the change is confirmed from Google's response."#
+    )]
     Tag(TagArgs),
     /// Remove the CLI's saved session (does not sign Chrome out)
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli logout\n  google-photos-web-cli --session-file ./work.env logout\n\nDeletes only the saved session file contents (same as 'auth logout'). Exported copies stay valid and your browser stays signed in."
+    )]
     Logout,
 }
 #[derive(Subcommand)]
 enum AuthCommand {
     /// Import Chrome cookies on macOS; save a portable session .env
     #[command(
-        after_help = "EXAMPLES:\n  google-photos-web-cli auth chrome\n  google-photos-web-cli auth chrome --profile \"Profile 1\" --account 1\n\nSign in at photos.google.com in Chrome first. Choose the Chrome profile\ndirectory (Default, Profile 1, etc.). --account is the N in /u/N/ when a\nprofile has multiple Google accounts; it is independent of --profile.\nmacOS may ask you to allow access to Chrome Safe Storage.\nThe CLI validates Google Photos access before saving its private .env file.\nRe-run this command to refresh an expired session. If Chrome's encryption\nor device-bound sessions prevent reuse, cookie import may also fail; the\nCLI reports the failure rather than trying to bypass browser protections."
+        after_help = "Examples:\n  google-photos-web-cli auth chrome\n  google-photos-web-cli auth chrome --profile \"Profile 1\" --account 1\n\nSign in at photos.google.com in Chrome first. Choose the Chrome profile\ndirectory (Default, Profile 1, etc.). --account is the N in /u/N/ when a\nprofile has multiple Google accounts; it is independent of --profile.\nmacOS may ask you to allow access to Chrome Safe Storage.\nThe CLI validates Google Photos access before saving its private .env file.\nRe-run this command to refresh an expired session. If Chrome's encryption\nor device-bound sessions prevent reuse, cookie import may also fail; the\nCLI reports the failure rather than trying to bypass browser protections."
     )]
     Chrome {
         /// Chrome profile directory, e.g. Default or 'Profile 1'
@@ -180,17 +191,27 @@ enum AuthCommand {
     },
     /// Import an explicitly exported Netscape cookies.txt file
     #[command(
-        after_help = "EXAMPLE:\n  google-photos-web-cli auth cookies /path/to/cookies.txt --account 0\n\nImports only Google Photos-compatible domains and unexpired cookies.\nThe source file is not deleted. Treat it as a password; don't commit or share\nit. The CLI saves the validated session in a private .env file on any platform."
+        after_help = "Examples:\n  google-photos-web-cli auth cookies cookies.txt\n  google-photos-web-cli auth cookies /path/to/cookies.txt --account 1\n\nExport cookies.txt from a signed-in photos.google.com tab with a browser extension.\n\nImports only Google Photos-compatible domains and unexpired cookies.\nThe source file is not deleted. Treat it as a password; don't commit or share\nit. The CLI saves the validated session in a private .env file on any platform."
     )]
     Cookies {
+        /// Path to the Netscape-format cookies.txt file (required)
         file: PathBuf,
+        /// Google account index within the browser profile (/u/N/)
         #[arg(long, default_value_t = 0)]
         account: u32,
     },
     /// Import an exported session .env file or a file containing just its token
-    Import { file: PathBuf },
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth import session.env\n  google-photos-web-cli --session-file ./other.env auth import session.env\n\nUse on a second machine with a file made by 'auth export --output'. Replaces the saved session. Treat the file like a password."
+    )]
+    Import {
+        /// Path to the exported session .env (or a file holding just the token) (required)
+        file: PathBuf,
+    },
     /// Export one portable session value (explicitly outputs credentials)
-    #[command(group=clap::ArgGroup::new("destination").required(true).args(["output","token"]))]
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth export --output session.env\n  google-photos-web-cli auth export --token | wl-copy\n\nChoose exactly one of --output or --token. The output contains your login cookies: never commit or share it. --output refuses to overwrite an existing file.",
+        group=clap::ArgGroup::new("destination").required(true).args(["output","token"]))]
     Export {
         /// Write GPHOTOS_SESSION=... to a new private .env file
         #[arg(long, conflicts_with = "token")]
@@ -200,18 +221,28 @@ enum AuthCommand {
         token: bool,
     },
     /// One-time migration of a 0.1 macOS Keychain session to portable .env storage
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth migrate-keychain\n\nOnly needed if you used version 0.1 on macOS. Copies the old Keychain session into the portable .env file."
+    )]
     MigrateKeychain,
     /// Validate the saved session; display its file path, never its value
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth status\n  google-photos-web-cli auth status --json\n  google-photos-web-cli --session-file ./work.env auth status\n\nExits non-zero if there is no valid session; then run 'auth chrome' or 'auth cookies FILE'."
+    )]
     Status {
+        /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
     },
     /// Remove the session from the selected local .env file
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth logout\n\nSame as top-level 'logout'. Exported copies stay valid and your browser stays signed in."
+    )]
     Logout,
 }
 #[derive(Args)]
 struct SearchArgs {
-    /// A Google Photos search query (quote multiple words)
+    /// Google Photos search text; quote multiple words (optional if --person/--person-id/--from/--to is given)
     query: Option<String>,
     /// Named tagged person (unique full or partial face-group name)
     #[arg(long, help_heading = "Advanced filters")]
@@ -263,6 +294,7 @@ struct DownloadArgs {
     /// Directory for the original filename (defaults to current directory)
     #[arg(long)]
     dir: Option<PathBuf>,
+    /// Print machine-readable JSON (source kind, bytes, SHA-256, saved path)
     #[arg(long)]
     json: bool,
 }
@@ -290,6 +322,7 @@ struct TagArgs {
     /// Print the request that would be sent; change nothing
     #[arg(long)]
     dry_run: bool,
+    /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
 }
@@ -842,8 +875,41 @@ fn print_inspection(info: &google_photos_web_cli::protocol::Inspection) {
     );
     println!("Link: {}", info.url);
 }
+/// Command path (e.g. "auth export") named on the command line, for error hints.
+fn command_path_from_args(args: &[String]) -> String {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let mut path = Vec::new();
+    for arg in args.iter().skip(1).filter(|a| !a.starts_with('-')) {
+        match cmd.find_subcommand(arg).cloned() {
+            Some(sub) => {
+                path.push(sub.get_name().to_string());
+                cmd = sub;
+            }
+            None => break,
+        }
+    }
+    path.join(" ")
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            if err.use_stderr() && std::env::args().len() > 1 {
+                let args: Vec<String> = std::env::args().collect();
+                let path = command_path_from_args(&args);
+                let sep = if path.is_empty() { "" } else { " " };
+                eprintln!("\nHelp with examples: google-photos-web-cli {path}{sep}--help");
+            }
+            std::process::exit(err.exit_code());
+        }
+    }
+}
+
 fn main() {
-    if let Err(err) = run(Cli::parse()) {
+    if let Err(err) = run(parse_cli()) {
         eprintln!("Error: {err:#}");
         std::process::exit(1);
     }
@@ -852,6 +918,106 @@ fn main() {
 #[cfg(test)]
 mod argument_tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn walk(cmd: &clap::Command, path: &str, out: &mut Vec<(String, clap::Command)>) {
+        out.push((path.to_string(), cmd.clone()));
+        for sub in cmd.get_subcommands().filter(|c| c.get_name() != "help") {
+            walk(sub, &format!("{path} {}", sub.get_name()), out);
+        }
+    }
+
+    #[test]
+    fn every_command_documents_every_argument_and_has_examples() {
+        let mut root = Cli::command();
+        root.build();
+        let mut all = Vec::new();
+        walk(&root, "google-photos-web-cli", &mut all);
+        assert!(all.len() > 10);
+        for (path, cmd) in all {
+            assert!(cmd.get_about().is_some(), "{path}: missing description");
+            for arg in cmd
+                .get_arguments()
+                .filter(|a| a.get_id() != "help" && a.get_id() != "version")
+            {
+                let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+                assert!(
+                    !help.trim().is_empty(),
+                    "{path}: argument {:?} has no help text",
+                    arg.get_id()
+                );
+            }
+            if path.ends_with("google-photos-web-cli") {
+                continue;
+            }
+            let after = cmd
+                .get_after_help()
+                .map(|h| h.to_string())
+                .unwrap_or_default();
+            assert!(after.contains("Examples"), "{path}: no Examples section");
+            assert!(
+                after.contains("google-photos-web-cli"),
+                "{path}: examples must be copy-pasteable invocations"
+            );
+            assert!(
+                cmd.get_long_about().is_none() && cmd.get_after_long_help().is_none(),
+                "{path}: -h and --help would differ"
+            );
+            assert!(
+                cmd.get_arguments().all(|a| a.get_long_help().is_none()),
+                "{path}: an argument has separate long help"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_help_has_examples_and_lists_every_command_once() {
+        let mut root = Cli::command();
+        root.build();
+        let text = root.render_help().to_string();
+        assert_eq!(text, root.render_long_help().to_string());
+        assert!(text.contains("EXAMPLES:"));
+        assert!(text.contains("FIRST-TIME SETUP"));
+        assert!(text.contains("SAFETY:"));
+        assert!(
+            !text.contains("Commands:\n"),
+            "framework command list would duplicate ours"
+        );
+        assert!(
+            text.lines().count() <= 70,
+            "top-level help should fit about one screen"
+        );
+        for sub in root.get_subcommands().filter(|c| c.get_name() != "help") {
+            assert!(
+                text.contains(sub.get_name()),
+                "top-level help omits {}",
+                sub.get_name()
+            );
+            for nested in sub.get_subcommands().filter(|c| c.get_name() != "help") {
+                assert!(
+                    text.contains(&format!("{} {}", sub.get_name(), nested.get_name())),
+                    "top-level help omits {} {}",
+                    sub.get_name(),
+                    nested.get_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn error_hint_points_at_the_deepest_named_command() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            command_path_from_args(&a(&["x", "auth", "export"])),
+            "auth export"
+        );
+        assert_eq!(
+            command_path_from_args(&a(&["x", "--json", "tag", "ID"])),
+            "tag"
+        );
+        assert_eq!(command_path_from_args(&a(&["x", "bogus"])), "");
+    }
+
     #[test]
     fn one_search_command_accepts_all_search_tactics_and_long_list_controls() {
         let cli = Cli::try_parse_from([
