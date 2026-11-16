@@ -276,6 +276,54 @@ pub struct Album {
     pub id: String,
     pub title: Option<String>,
 }
+pub(crate) fn parse_album_page(data: &Value) -> Result<(Vec<Album>, Option<String>)> {
+    let page = data
+        .as_array()
+        .context("Unexpected Google Photos album page")?;
+    let next = match page.get(1) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(token)) => Some(token.clone()).filter(|token| !token.is_empty()),
+        _ => bail!("Unexpected Google Photos album continuation token"),
+    };
+    let albums = match page.first() {
+        Some(Value::Array(rows)) => rows
+            .iter()
+            .map(|row| {
+                let id = field(row, 0)
+                    .as_str()
+                    .context("Google Photos album row is missing its ID")?;
+                Ok(Album {
+                    id: id.to_owned(),
+                    title: field(field(row, 1), 0).as_str().map(str::to_owned),
+                })
+            })
+            .collect::<Result<_>>()?,
+        None | Some(Value::Null) if next.is_none() => Vec::new(),
+        _ => bail!("Unexpected Google Photos album rows"),
+    };
+    Ok((albums, next))
+}
+
+pub(crate) fn album_add_payload(album_id: &str, photo_ids: &[String]) -> Value {
+    let entries: Vec<_> = photo_ids.iter().map(|id| json!([[id]])).collect();
+    json!([album_id, [2, null, entries, null, null, null, [1]]])
+}
+
+pub(crate) fn confirm_album_add(data: &Value, photo_ids: &[String]) -> Result<()> {
+    let confirmed = field(data, 4).as_array();
+    let missing = photo_ids
+        .iter()
+        .filter(|id| {
+            !confirmed
+                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(id.as_str())))
+        })
+        .count();
+    if missing != 0 {
+        bail!("Google Photos did not confirm album membership for {missing} of {} requested photos. Check the destination album before retrying", photo_ids.len());
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct Inspection {
     pub id: String,
@@ -1010,5 +1058,69 @@ mod face_tests {
         assert!(confirm_face_tag(&data, PHOTO, TAGGED_FACE, "AF1QipOther").is_err());
         assert!(confirm_face_tag(&data, "AF1QipOtherPhoto", TAGGED_FACE, PERSON).is_err());
         assert!(confirm_face_tag(&json!([]), PHOTO, TAGGED_FACE, PERSON).is_err());
+    }
+}
+
+#[cfg(test)]
+mod album_tests {
+    use super::*;
+
+    #[test]
+    fn album_picker_parses_rows_and_continuation() {
+        let (albums, next) = parse_album_page(&json!([
+            [
+                ["AF1QipExampleAlbum", ["Artwork"]],
+                ["AF1QipUntitledAlbum", [null]]
+            ],
+            "page-two"
+        ]))
+        .unwrap();
+        assert_eq!(next.as_deref(), Some("page-two"));
+        assert_eq!(albums[0].id, "AF1QipExampleAlbum");
+        assert_eq!(albums[0].title.as_deref(), Some("Artwork"));
+        assert_eq!(albums[1].title, None);
+        assert!(parse_album_page(&json!([[], null])).unwrap().1.is_none());
+        assert!(parse_album_page(&json!([[], 3])).is_err());
+        assert!(parse_album_page(&json!([[[null, ["Artwork"]]]])).is_err());
+    }
+
+    #[test]
+    fn album_add_matches_browser_and_requires_confirmation_for_each_photo() {
+        let ids = [
+            "AF1QipExamplePhoto".to_owned(),
+            "AF1QipSecondPhoto".to_owned(),
+        ];
+        assert_eq!(
+            album_add_payload("AF1QipExampleAlbum", &ids),
+            json!([
+                "AF1QipExampleAlbum",
+                [
+                    2,
+                    null,
+                    [[["AF1QipExamplePhoto"]], [["AF1QipSecondPhoto"]]],
+                    null,
+                    null,
+                    null,
+                    [1]
+                ]
+            ])
+        );
+        assert!(confirm_album_add(
+            &json!([
+                "synthetic",
+                null,
+                0,
+                null,
+                ["AF1QipSecondPhoto", "AF1QipExamplePhoto"]
+            ]),
+            &ids
+        )
+        .is_ok());
+        assert!(confirm_album_add(
+            &json!(["synthetic", null, 0, null, ["AF1QipExamplePhoto"]]),
+            &ids
+        )
+        .is_err());
+        assert!(confirm_album_add(&json!([]), &ids).is_err());
     }
 }

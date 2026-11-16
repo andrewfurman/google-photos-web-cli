@@ -30,10 +30,12 @@ COMMANDS:
     auth migrate-keychain   One-time upgrade from version 0.1 (macOS)
   Read (never changes your library)
     search [QUERY]          Search by text, people, place, dates; optionally download
+    albums                  List albums available for adding photos
     people                  List face groups (people) and their IDs
     inspect PHOTO_ID        Show a photo's metadata and detected faces
     download PHOTO_ID       Save the full-size original
   Change (writes to your library)
+    album-add PHOTO_ID...   Add photos to an existing album
     tag PHOTO_ID            Tag a detected face with an existing person
 
 EXAMPLES:
@@ -41,6 +43,8 @@ EXAMPLES:
   google-photos-web-cli search "Paris October 2026" --limit 50
   google-photos-web-cli search --person "Jane Doe" --from 2026-10-01 --to 2026-10-31
   google-photos-web-cli search beach --all --json > results.json
+  google-photos-web-cli albums --json
+  google-photos-web-cli album-add AF1QipExamplePhotoId --album "Artwork" --dry-run
   google-photos-web-cli people --name Jane
   google-photos-web-cli inspect AF1QipExamplePhotoId --json
   google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
@@ -48,8 +52,8 @@ EXAMPLES:
 
 MORE HELP:  google-photos-web-cli <command> --help   (or: help <command>, e.g. help search)
 OUTPUT:     readable text by default; --json on search, people, inspect, download,
-            tag and auth status gives JSON on stdout (progress and errors go to stderr).
-SAFETY:     only 'tag' changes your library; add --dry-run to preview it first.
+            albums, album-add, tag and auth status gives JSON on stdout.
+SAFETY:     Add --dry-run to preview album-add and tag. Album additions require --yes.
             Downloads never overwrite files. 'auth export' prints credentials:
             treat the result like a password. Sessions can expire or be revoked by
             Google; if a command says so, sign in again (auth chrome / auth cookies).
@@ -114,6 +118,25 @@ limits, including --all. JSON includes ordering, people, person_match,
 candidates_checked, complete, stop_reason, and next_page_token.
 --download DIRECTORY downloads displayed matches without changing the library."#)]
     Search(SearchArgs),
+    /// List albums available in the Google Photos Add to album picker
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli albums\n  google-photos-web-cli albums --json\n\nRead-only. Use an ID with 'album-add --album-id'."
+    )]
+    Albums {
+        /// Print machine-readable JSON with album IDs and titles
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add one or more library photos to an existing album
+    #[command(after_help = r#"Examples:
+  google-photos-web-cli album-add PHOTO_ID --album "Artwork" --dry-run
+  google-photos-web-cli album-add PHOTO_ID_1 PHOTO_ID_2 --album-id ALBUM_ID --yes --json
+
+Photo IDs come from 'search'. Look up album IDs with 'albums'.
+Use one exact, case-sensitive album title or an album ID. Adding photos
+keeps their existing library and album memberships. Members of a shared
+destination album can see photos added to it. --yes applies the change."#)]
+    AlbumAdd(AlbumAddArgs),
     /// List Google's returned face groups and their IDs (named groups by default)
     #[command(
         after_help = "Examples:\n  google-photos-web-cli people\n  google-photos-web-cli people --name Jane\n  google-photos-web-cli people --include-unnamed --json\n\nUse the IDs with 'search --person-id' and 'tag --person-id'. Read-only."
@@ -298,6 +321,83 @@ struct DownloadArgs {
     #[arg(long)]
     json: bool,
 }
+#[derive(Args)]
+#[command(group = clap::ArgGroup::new("album_target").required(true).args(["album", "album_id"]))]
+#[command(group = clap::ArgGroup::new("album_action").required(true).args(["dry_run", "yes"]))]
+struct AlbumAddArgs {
+    /// One or more photo IDs from 'search'
+    #[arg(required = true, num_args = 1..)]
+    photo_ids: Vec<String>,
+    /// Exact, case-sensitive title of a uniquely named album
+    #[arg(long)]
+    album: Option<String>,
+    /// Exact destination ID from 'albums'
+    #[arg(long)]
+    album_id: Option<String>,
+    /// Show the destination ID and photo IDs without adding anything
+    #[arg(long)]
+    dry_run: bool,
+    /// Add photos to the specified album
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_album_add(mut args: AlbumAddArgs) -> Result<()> {
+    for id in &args.photo_ids {
+        client::check_id(id)?;
+    }
+    let mut seen = std::collections::HashSet::new();
+    args.photo_ids.retain(|id| seen.insert(id.clone()));
+
+    let album_id = if let Some(id) = args.album_id {
+        client::check_id(&id).context("Invalid album ID")?;
+        if args.yes {
+            with_saved(|client| client.add_to_album(&id, &args.photo_ids))?;
+        }
+        id
+    } else {
+        let title = args.album.context("Choose --album or --album-id")?;
+        with_saved(|client| {
+            let mut matches = client
+                .albums()?
+                .into_iter()
+                .filter(|album| album.title.as_deref() == Some(title.as_str()));
+            let album = matches
+                .next()
+                .with_context(|| format!("No album titled {title:?} in the album picker"))?;
+            if matches.next().is_some() {
+                bail!("More than one album is titled {title:?}. Run 'albums' and use --album-id");
+            }
+            if args.yes {
+                client.add_to_album(&album.id, &args.photo_ids)?;
+            }
+            Ok(album.id)
+        })?
+    };
+
+    if args.json {
+        print_json(&serde_json::json!({
+            "status": if args.dry_run { "dry_run" } else { "added" },
+            "album_id": album_id,
+            "photo_ids": args.photo_ids,
+        }))?;
+    } else if args.dry_run {
+        println!("Would add these photos to album {album_id}:");
+        for id in args.photo_ids {
+            println!("{id}");
+        }
+    } else {
+        println!(
+            "Google Photos confirmed {} photo(s) in album {album_id}.",
+            args.photo_ids.len()
+        );
+    }
+    Ok(())
+}
+
 #[derive(Args)]
 #[command(group = clap::ArgGroup::new("target_face").required(true).args(["face", "face_id"]))]
 #[command(group = clap::ArgGroup::new("target_person").required(true).args(["person", "person_id"]))]
@@ -731,6 +831,22 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             })?;
         }
+        Command::Albums { json } => with_saved(|client| {
+            let albums = client.albums()?;
+            if json {
+                print_json(&albums)?;
+            } else {
+                for album in albums {
+                    println!(
+                        "{}\t{}",
+                        album.id,
+                        album.title.as_deref().unwrap_or("(untitled)")
+                    );
+                }
+            }
+            Ok(())
+        })?,
+        Command::AlbumAdd(args) => run_album_add(args)?,
         Command::Tag(args) => {
             client::check_id(&args.id)?;
             with_saved(|client| run_tag(client, &args))?;
