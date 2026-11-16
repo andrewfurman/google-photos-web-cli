@@ -343,6 +343,45 @@ impl PhotosClient {
         }
         result
     }
+    /// List the albums offered by the Google Photos Add to album picker.
+    pub fn albums(&mut self) -> Result<Vec<protocol::Album>> {
+        let mut albums = Vec::new();
+        let mut token: Option<String> = None;
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        loop {
+            let data = self.rpc(
+                "Z5xsfc",
+                json!([token, null, null, null, 1, null, 3, 50, [2], 5]),
+            )?;
+            let (page, next) = protocol::parse_album_page(&data)?;
+            albums.extend(
+                page.into_iter()
+                    .filter(|album| seen_ids.insert(album.id.clone())),
+            );
+            let Some(next) = next else {
+                return Ok(albums);
+            };
+            if !seen_tokens.insert(next.clone()) {
+                bail!("Google Photos repeated an album continuation token");
+            }
+            token = Some(next);
+        }
+    }
+
+    /// Add existing library photos to an existing album with one mutation request.
+    pub fn add_to_album(&mut self, album_id: &str, photo_ids: &[String]) -> Result<()> {
+        check_id(album_id).context("Invalid album ID")?;
+        if photo_ids.is_empty() {
+            bail!("Specify at least one photo ID");
+        }
+        for id in photo_ids {
+            check_id(id)?;
+        }
+        let data = self.rpc("laUYf", protocol::album_add_payload(album_id, photo_ids))?;
+        protocol::confirm_album_add(&data, photo_ids)
+    }
+
     pub fn people(&mut self) -> Result<Vec<protocol::Person>> {
         let data = self.rpc("yQelMe", json!([null, null, null, [[1, null, 1]]]))?;
         protocol::people_index(&data)

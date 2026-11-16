@@ -30,6 +30,8 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         vec!["download", "--help"],
         vec!["inspect", "--help"],
         vec!["people", "--help"],
+        vec!["albums", "--help"],
+        vec!["album-add", "--help"],
         vec!["tag", "--help"],
         vec!["auth", "export", "--help"],
         vec!["auth", "import", "--help"],
@@ -177,4 +179,33 @@ fn mistakes_point_to_command_help() {
     let out = bin().arg("bogus").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8(out.stderr).unwrap().contains("--help"));
+}
+
+#[test]
+fn album_add_requires_explicit_action_and_deduplicates_the_dry_run() {
+    let base = [
+        "album-add",
+        "AF1QipExamplePhoto",
+        "AF1QipExamplePhoto",
+        "--album-id",
+        "AF1QipExampleAlbum",
+    ];
+    bin().args(base).assert().code(2);
+    bin()
+        .args(base)
+        .args(["--dry-run", "--yes"])
+        .assert()
+        .code(2);
+    let output = bin()
+        .args(base)
+        .args(["--dry-run", "--json"])
+        .assert()
+        .success();
+    let result: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(result["status"], "dry_run");
+    assert_eq!(result["album_id"], "AF1QipExampleAlbum");
+    assert_eq!(
+        result["photo_ids"],
+        serde_json::json!(["AF1QipExamplePhoto"])
+    );
 }

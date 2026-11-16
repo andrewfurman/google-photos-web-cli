@@ -209,6 +209,22 @@ Missing values remain `null`; unavailable fields are not guessed. These fields
 are Google's metadata, not a promise to expose every possible EXIF/IPTC tag.
 A location may have been estimated or edited in Google Photos.
 
+### Add photos to an album
+
+```bash
+google-photos-web-cli search "watercolor" --json
+google-photos-web-cli albums
+google-photos-web-cli album-add AF1QipExamplePhoto --album "Artwork" --dry-run
+google-photos-web-cli album-add AF1QipExamplePhoto AF1QipSecondPhoto --album "Artwork" --yes
+```
+
+Pass photo IDs from search and an exact album title. If the title is shared by
+multiple albums, pass the ID from `albums` using `--album-id` instead. Adding a
+photo preserves its library and other album memberships. People with access to
+a shared destination album can see photos added to it. Both commands support
+`--json`. The CLI sends one write and checks Google's response for every
+requested photo. If any are unconfirmed, check the destination before retrying.
+
 ### Tag a face with an existing person
 
 `google-photos-web-cli tag` is the only command that changes your library. It assigns one
