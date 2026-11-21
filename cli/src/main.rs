@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use google_photos_web_cli::{
     auth::{self, Session},
     client::{self, PhotosClient, SearchOptions, SearchSort},
+    keepalive,
     protocol::SessionExpired,
 };
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ COMMANDS:
     auth import FILE        Import a session file made by 'auth export'
     auth export             Export the session to move it to another machine
     auth status             Check the saved session (never prints it)
+    auth keepalive          Rotate sign-in cookies; run every ~10 min from cron
     auth logout, logout     Delete the saved session
     auth migrate-keychain   One-time upgrade from version 0.1 (macOS)
   Read (never changes your library)
@@ -72,7 +74,7 @@ struct Cli {
 enum Command {
     /// Import, check, refresh, or remove the locally saved session
     #[command(
-        after_help = "Examples:\n  google-photos-web-cli auth chrome\n  google-photos-web-cli auth cookies cookies.txt\n  google-photos-web-cli auth status\n  google-photos-web-cli auth export --output session.env\n\nSESSION LIFETIME AND REFRESH:\n\nNo single guaranteed expiry exists: GPHOTOS_SESSION packages several cookies.\nGoogle can revoke it before their expiry dates. There is no supported OAuth\nrefresh token for this method. Normal commands persist returned cookie updates\nto the selected .env file, but cannot renew a revoked Google login.\n\nOn macOS, search retries once after refreshing an expired session saved by\ngphotos auth chrome. Chrome must still be signed into the same account.\n\nIf automatic refresh is unavailable or fails:\n  1. Sign in / complete any verification at photos.google.com in your browser.\n  2. macOS: google-photos-web-cli auth chrome; any OS: google-photos-web-cli auth cookies /path/to/cookies.txt\n  3. google-photos-web-cli auth status\n  4. google-photos-web-cli auth export --output new-session.env\n     On another machine: google-photos-web-cli auth import new-session.env\n\nExport destinations must be new files; existing exports are not overwritten.\nRun 'google-photos-web-cli auth <subcommand> --help' for details on each."
+        after_help = "Examples:\n  google-photos-web-cli auth chrome\n  google-photos-web-cli auth cookies cookies.txt\n  google-photos-web-cli auth status\n  google-photos-web-cli auth export --output session.env\n\nSESSION LIFETIME AND REFRESH:\n\nNo single guaranteed expiry exists: GPHOTOS_SESSION packages several cookies.\nGoogle can revoke it before their expiry dates. There is no supported OAuth\nrefresh token for this method. Normal commands persist returned cookie updates\nto the selected .env file, but cannot renew a revoked Google login.\n'auth keepalive' every ~10 minutes rotates the short-lived sign-in cookies so a\nsession used only by this CLI can last for months (docs/SESSION_REFRESH.md).\n\nOn macOS, search retries once after refreshing an expired session saved by\ngphotos auth chrome. Chrome must still be signed into the same account.\n\nIf automatic refresh is unavailable or fails:\n  1. Sign in / complete any verification at photos.google.com in your browser.\n  2. macOS: google-photos-web-cli auth chrome; any OS: google-photos-web-cli auth cookies /path/to/cookies.txt\n  3. google-photos-web-cli auth status\n  4. google-photos-web-cli auth export --output new-session.env\n     On another machine: google-photos-web-cli auth import new-session.env\n\nExport destinations must be new files; existing exports are not overwritten.\nRun 'google-photos-web-cli auth <subcommand> --help' for details on each."
     )]
     Auth {
         #[command(subcommand)]
@@ -248,6 +250,15 @@ enum AuthCommand {
         after_help = "Examples:\n  google-photos-web-cli auth migrate-keychain\n\nOnly needed if you used version 0.1 on macOS. Copies the old Keychain session into the portable .env file."
     )]
     MigrateKeychain,
+    /// Rotate Google's short-lived sign-in cookies, save them, then verify the session
+    #[command(
+        after_help = "Examples:\n  google-photos-web-cli auth keepalive\n  google-photos-web-cli auth keepalive --quiet\n  google-photos-web-cli --session-file ./work.env auth keepalive\n  crontab: */10 * * * * timeout 120 google-photos-web-cli auth keepalive --quiet\n\nPOSTs https://accounts.google.com/RotateCookies with the saved cookies (the\nrefresh Google's own pages perform), saves the renewed __Secure-1PSIDTS /\nSIDCC cookies atomically to the session file, then runs the 'auth status'\ncheck. Run it every ~10 minutes, and no more than once a minute (HTTP 429).\n\nOnly for a session that nothing else uses: a copy shared with a signed-in\nbrowser fights it, and one side is signed out within minutes. Sign in once\nwith a dedicated browser profile, import, then close that browser.\nNeeds a session file; refuses GPHOTOS_SESSION from the environment.\nExits non-zero (message on stderr, never cookie values) if Google rejects\nthe session; then sign in again. See docs/SESSION_REFRESH.md."
+    )]
+    Keepalive {
+        /// Print nothing on success (errors still go to stderr); for cron
+        #[arg(long, short)]
+        quiet: bool,
+    },
     /// Validate the saved session; display its file path, never its value
     #[command(
         after_help = "Examples:\n  google-photos-web-cli auth status\n  google-photos-web-cli auth status --json\n  google-photos-web-cli --session-file ./work.env auth status\n\nExits non-zero if there is no valid session; then run 'auth chrome' or 'auth cookies FILE'."
@@ -647,6 +658,30 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     Ok(())
                 })?,
+                AuthCommand::Keepalive { quiet } => {
+                    let (session, report) = keepalive::rotate(&auth::load()?)?;
+                    session.save().context(
+                        "Google rotated the cookies, but the session file could not be updated",
+                    )?;
+                    let client = PhotosClient::connect(session).context(
+                        "Cookies were rotated and saved, but the Google Photos check failed",
+                    )?;
+                    client.save()?;
+                    if !quiet {
+                        let rotated = if report.rotated_psidts() {
+                            format!("{} renewed", keepalive::PSIDTS)
+                        } else {
+                            format!("Google did not return a new {}", keepalive::PSIDTS)
+                        };
+                        println!(
+                            "Session kept alive: {rotated}; {} cookie(s) updated. Authenticated: {} (account index {}). Session file: {}.",
+                            report.changed.len(),
+                            client.account_email().unwrap_or("Google Photos"),
+                            client.account_index(),
+                            auth::session_path()?.display()
+                        );
+                    }
+                }
                 AuthCommand::Logout => {
                     auth::logout()?;
                     println!("Local session file cleared. Chrome and exported copies remain signed in. Unset GPHOTOS_SESSION too if you supplied it in your shell.");

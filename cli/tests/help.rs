@@ -15,6 +15,7 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         "GPHOTOS_SESSION",
         "inspect PHOTO_ID",
         "auth export",
+        "auth keepalive",
         "EXAMPLES:",
         "FIRST-TIME SETUP",
         "SAFETY:",
@@ -35,6 +36,8 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         vec!["tag", "--help"],
         vec!["auth", "export", "--help"],
         vec!["auth", "import", "--help"],
+        vec!["auth", "keepalive", "--help"],
+        vec!["help", "auth", "keepalive"],
     ] {
         Command::new(assert_cmd::cargo::cargo_bin!("google-photos-web-cli"))
             .args(command)
@@ -123,12 +126,28 @@ fn detailed_help_documents_filters_pagination_metadata_and_session_refresh() {
             ],
         ),
         (
+            vec!["auth", "keepalive", "--help"],
+            vec![
+                "Examples:",
+                "google-photos-web-cli auth keepalive --quiet",
+                "--quiet",
+                "--session-file",
+                "RotateCookies",
+                "every ~10 minutes",
+                "auth status",
+                "__Secure-1PSIDTS",
+                "never cookie values",
+                "docs/SESSION_REFRESH.md",
+            ],
+        ),
+        (
             vec!["help", "auth"],
             vec![
                 "No single guaranteed expiry",
                 "refresh token",
                 "auth cookies",
                 "auth export",
+                "auth keepalive",
             ],
         ),
     ] {
