@@ -78,11 +78,19 @@ impl Session {
         )
     }
     pub fn save_store(&self, store: &CookieStore) -> Result<()> {
+        self.with_store(store)?.save()
+    }
+    /// The same session (account, source file, Chrome refresh target) holding new cookies.
+    pub fn with_store(&self, store: &CookieStore) -> Result<Self> {
         let mut updated = Self::new(store, self.account_index, self.chrome_profile.clone())?;
         updated.local_chrome_account = self.local_chrome_account.clone();
         updated.source = self.source.clone();
         updated.environment_only = self.environment_only;
-        updated.save()
+        Ok(updated)
+    }
+    /// True when the session came from the GPHOTOS_SESSION variable and cannot be written back.
+    pub fn is_environment_only(&self) -> bool {
+        self.environment_only
     }
     /// Imported sessions are explicitly saved in the selected destination, not their source file.
     pub fn import_file(path: &Path) -> Result<Self> {

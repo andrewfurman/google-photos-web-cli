@@ -10,6 +10,9 @@ The project is not affiliated with or endorsed by Google.
 
 ## Install
 
+> v0.6.0 adds `auth keepalive`, which rotates Google's short-lived sign-in cookie so a session used only
+> by this CLI can last for months. See [Keeping a session alive](docs/SESSION_REFRESH.md).
+
 > Renamed in v0.5.0: the repo was `google-photos-CLI` and the command was `gphotos`. Sessions saved in
 > `~/.config/gphotos/.env` are still found, and `GPHOTOS_SESSION` / `GPHOTOS_SESSION_FILE` keep their names.
 > New sessions are saved in `~/.config/google-photos-web-cli/.env` (the platform config directory).
@@ -364,12 +367,23 @@ If automatic refresh is unavailable or fails:
 3. Run `google-photos-web-cli auth status` to verify access.
 4. Export a new file with `google-photos-web-cli auth export --output new-session.env`; import it on the other machine with `google-photos-web-cli auth import new-session.env`.
 
-Normal file-based commands persist cookie updates. No browser keepalive runs in
-the background. Browser activity does not guarantee an imported copy stays valid.
-If it expires, sign in in your browser and import fresh cookies/session data.
+Normal file-based commands persist cookie updates. Browser activity does not
+guarantee an imported copy stays valid: a copy shared with a still-open, signed-in
+browser is typically signed out within minutes, because both rotate the same
+short-lived `__Secure-1PSIDTS` cookie. If it expires, sign in in your browser and
+import fresh cookies/session data.
+
+For a long-lived session, give the CLI its own sign-in (a separate browser profile
+that you close after importing; on a Linux server use
+[`scripts/novnc-signin.sh`](scripts/novnc-signin.sh)) and run
+`google-photos-web-cli auth keepalive --quiet` every ~10 minutes from cron or a
+systemd timer. It POSTs Google's `RotateCookies` endpoint, saves the renewed
+cookies atomically, and runs the `auth status` check. Details, sources and caveats:
+[Keeping a session alive](docs/SESSION_REFRESH.md).
 
 ```bash
 google-photos-web-cli auth status
+google-photos-web-cli auth keepalive --quiet   # every ~10 minutes; see docs/SESSION_REFRESH.md
 google-photos-web-cli logout
 ```
 
@@ -416,6 +430,7 @@ with `--dry-run`.
 | `auth export --output FILE` | Export one portable value to a new private file |
 | `auth export --token` | Explicitly print the copyable session value |
 | `auth status [--json]` | Validate authentication without displaying credentials |
+| `auth keepalive [--quiet]` | Rotate the short-lived sign-in cookies, save them, and verify (cron every ~10 min) |
 | `auth migrate-keychain` | Migrate an existing 0.1 session on macOS |
 | `logout` / `auth logout` | Clear the selected local session file |
 | `people [--name NAME]` | List Google's returned face groups |
