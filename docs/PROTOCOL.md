@@ -15,8 +15,8 @@ The baseline framing and metadata positions are credited in the third-party noti
 | Extended photo info | `fDcn4b` | `[photo_id,1,null,null,1]`; the photo record is response `[0]`. |
 | Photo / download info | `VrseUb` | `[photo_id,null,null,null,null]`; direct full-size/original URLs are response `[1]` and `[7]` when present. |
 | Batched filenames | `EWgK9e` | Options require their own nested array; response `[0][1]` contains filename records. |
-| List destination albums | `Z5xsfc` | `[page_token,null,null,null,1,null,3,50,[2],5]`; album rows in response `[0]`, next token in `[1]`; each row has ID at `[0]` and title at `[1][0]`. |
-| Add photos to an album (**write**) | `laUYf` | `[album_id,[2,null,[[[photo_id]],…],null,null,null,[1]]]`; response `[4]` contains confirmed photo IDs. The UI may then refresh its album list with `Z5xsfc`. |
+| List destination albums | `Z5xsfc` | `[page_token,null,null,null,1,null,3,50,[2],5]`; album rows in response `[0]`, next token in `[1]`; each row has ID at `[0]`. Title: since Nov 2026 in the trailing metadata object `{"72930366":[kind,title,…]}` (`[1][0]` is now the cover photo URL); older replies had it at `[1][0]`. |
+| Add photos to an album (**write**) | `laUYf` | `[album_id,[2,null,[[[photo_id]],…],null,null,null,[1]]]`; confirmation: older replies echoed the requested IDs in `[4]`; since Nov 2026 `[4]` holds new album-item IDs and `[5][0]` pairs them, `[[requested_id, album_item_id, 2], …]`. Re-adding returns the same album-item IDs (no duplicates). The UI may then refresh its album list with `Z5xsfc`. |
 | Tag a face (**write**) | `k9FTge` | `[[null,media_key],[[[face_id],[group_id]]],[[null×20,[]]],[[],[null,null,[null,1]]]]`; `media_key` is extended-record field 11. Response `[0][0]` is the updated photo record; its field `[1][22]` must link `group_id` to `face_id`. |
 
 Extended-photo record positions used by `inspect`: filename 2, capture timestamp 3,

@@ -453,6 +453,23 @@ change it without notice. Automated access may be restricted under
 - **Search rate limits:** the CLI retries HTTP 429 and RPC code 8 within the search time budget. It uses Google’s `Retry-After` when available and exponential backoff otherwise.
 - **Destination exists:** choose another output filename; existing data is preserved.
 
+### When Google changes its responses (fix it with a coding agent)
+
+Google's web API is undocumented and changes without notice. Typical signs: album titles print as
+`https://photos.fife.usercontent.google.com/...` links, a write reports "did not confirm", or a command fails
+with "Unexpected Google Photos ...". The fix is usually a small parser change. To have Claude Code or a similar
+coding agent repair it:
+
+1. **Capture one raw reply.** Temporarily `eprintln!("{data}")` the response in the matching `parse_*` /
+   `confirm_*` function in `cli/src/protocol.rs` (the RPC IDs are listed in [docs/PROTOCOL.md](docs/PROTOCOL.md)),
+   build, and run the failing command once. Look only at the shape; never commit or paste real IDs, titles, URLs or cookies.
+2. **Update the parser to accept the new shape and keep the old one** (Google rolls changes out gradually).
+3. **Add a synthetic test** for the new shape next to the existing one, and note the new field positions in `docs/PROTOCOL.md`.
+4. **Remove the debug print**, run the three checks below, bump the patch version in `cli/Cargo.toml`,
+   then branch, open a pull request, and merge once CI passes. Reinstall with `cargo install --path cli --locked`.
+
+Writes are safe to retry after a fix: re-adding a photo to an album returns the same album item, so no duplicates.
+
 ## Repository, contributor, and agent instructions
 
 Keep Rust source, `Cargo.toml`, and `Cargo.lock` under **`cli/`**, supporting

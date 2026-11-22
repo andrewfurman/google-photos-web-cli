@@ -276,6 +276,21 @@ pub struct Album {
     pub id: String,
     pub title: Option<String>,
 }
+/// Album title. Since Nov 2026 Google puts it in a trailing `{"72930366": [kind, title, ...]}` object and
+/// `row[1][0]` holds the cover photo URL; older responses had the title at `row[1][0]`.
+fn album_title(row: &Value) -> Option<String> {
+    let from_meta = row.as_array().into_iter().flatten().rev().find_map(|item| {
+        item.as_object()?
+            .values()
+            .find_map(|meta| meta.get(1)?.as_str().map(str::to_owned))
+    });
+    from_meta.or_else(|| {
+        field(field(row, 1), 0)
+            .as_str()
+            .filter(|title| !title.starts_with("https://"))
+            .map(str::to_owned)
+    })
+}
 pub(crate) fn parse_album_page(data: &Value) -> Result<(Vec<Album>, Option<String>)> {
     let page = data
         .as_array()
@@ -294,7 +309,7 @@ pub(crate) fn parse_album_page(data: &Value) -> Result<(Vec<Album>, Option<Strin
                     .context("Google Photos album row is missing its ID")?;
                 Ok(Album {
                     id: id.to_owned(),
-                    title: field(field(row, 1), 0).as_str().map(str::to_owned),
+                    title: album_title(row),
                 })
             })
             .collect::<Result<_>>()?,
@@ -310,12 +325,17 @@ pub(crate) fn album_add_payload(album_id: &str, photo_ids: &[String]) -> Value {
 }
 
 pub(crate) fn confirm_album_add(data: &Value, photo_ids: &[String]) -> Result<()> {
-    let confirmed = field(data, 4).as_array();
+    // Older replies echoed the requested IDs in data[4]. Since Nov 2026 data[4] holds new album-item IDs and
+    // data[5][0] pairs each requested ID with its album-item ID: [[requested, album_item, 2], ...].
+    let echoed = field(data, 4).as_array();
+    let pairs = field(field(data, 5), 0).as_array();
     let missing = photo_ids
         .iter()
         .filter(|id| {
-            !confirmed
-                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(id.as_str())))
+            let id = Some(id.as_str());
+            !(echoed.is_some_and(|items| items.iter().any(|item| item.as_str() == id))
+                || pairs
+                    .is_some_and(|items| items.iter().any(|pair| field(pair, 0).as_str() == id)))
         })
         .count();
     if missing != 0 {
@@ -1080,6 +1100,18 @@ mod album_tests {
         assert_eq!(albums[0].title.as_deref(), Some("Artwork"));
         assert_eq!(albums[1].title, None);
         assert!(parse_album_page(&json!([[], null])).unwrap().1.is_none());
+        // Nov 2026 shape: cover URL at [1][0], title inside the trailing metadata object.
+        let (albums, _) = parse_album_page(&json!([[[
+            "AF1QipNewShape",
+            ["https://photos.fife.usercontent.google.com/pw/cover", 3024, 4032],
+            null, null, null, null, ["AF1QipOwner"], [[9]], null, null, [],
+            {"72930366": [4, "Emma’s Art", [], 260, true]}
+        ]], null]))
+        .unwrap();
+        assert_eq!(albums[0].title.as_deref(), Some("Emma’s Art"));
+        let (albums, _) =
+            parse_album_page(&json!([[["AF1QipUntitled", ["https://cover"]]], null])).unwrap();
+        assert_eq!(albums[0].title, None);
         assert!(parse_album_page(&json!([[], 3])).is_err());
         assert!(parse_album_page(&json!([[[null, ["Artwork"]]]])).is_err());
     }
@@ -1116,6 +1148,28 @@ mod album_tests {
             &ids
         )
         .is_ok());
+        // Nov 2026 shape: data[4] has new album-item IDs; data[5][0] pairs requested -> album item.
+        let paired = json!([
+            "ig",
+            null,
+            2,
+            null,
+            ["AF1QipItemOne", "AF1QipItemTwo"],
+            [[
+                ["AF1QipExamplePhoto", "AF1QipItemOne", 2],
+                ["AF1QipSecondPhoto", "AF1QipItemTwo", 2]
+            ]]
+        ]);
+        assert!(confirm_album_add(&paired, &ids).is_ok());
+        let partial = json!([
+            "ig",
+            null,
+            2,
+            null,
+            ["AF1QipItemOne"],
+            [[["AF1QipExamplePhoto", "AF1QipItemOne", 2]]]
+        ]);
+        assert!(confirm_album_add(&partial, &ids).is_err());
         assert!(confirm_album_add(
             &json!(["synthetic", null, 0, null, ["AF1QipExamplePhoto"]]),
             &ids
