@@ -50,7 +50,7 @@ pub fn globals(html: &str) -> Result<Value> {
     Ok(value)
 }
 #[derive(Debug)]
-pub(crate) struct RateLimit {
+pub struct RateLimit {
     pub(crate) source: &'static str,
     pub(crate) retry_after: Option<std::time::Duration>,
 }
@@ -69,6 +69,22 @@ impl std::fmt::Display for RateLimit {
 }
 
 impl std::error::Error for RateLimit {}
+
+/// Google answered the RPC with an error status (3 = INVALID_ARGUMENT, …).
+#[derive(Debug)]
+pub struct RpcRejected(pub i64);
+
+impl std::fmt::Display for RpcRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Google Photos rejected the request (RPC code {})",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RpcRejected {}
 
 #[derive(Debug)]
 pub struct SessionExpired;
@@ -93,7 +109,7 @@ fn rpc_rejection(frame: &[Value]) -> anyhow::Error {
         }
         .into(),
         Some(16) => SessionExpired.into(),
-        Some(code) => anyhow!("Google Photos rejected the request (RPC code {code})"),
+        Some(code) => RpcRejected(code).into(),
         None => anyhow!("Google Photos rejected the request without a status code"),
     }
 }
@@ -324,18 +340,40 @@ pub(crate) fn album_add_payload(album_id: &str, photo_ids: &[String]) -> Value {
     json!([album_id, [2, null, entries, null, null, null, [1]]])
 }
 
+/// `E1Cajb`: add library photos to an album you own (GPTK `addItemsToAlbum`).
+pub(crate) fn owned_album_add_payload(album_id: &str, photo_ids: &[String]) -> Value {
+    json!([photo_ids, album_id])
+}
+
+/// `OXvT9d`: create an empty album (GPTK `createAlbum`).
+pub(crate) fn album_create_payload(title: &str) -> Value {
+    json!([title, null, 2])
+}
+
+/// `OXvT9d` answers with the new album's ID at `[0][0]`.
+pub(crate) fn created_album_id(data: &Value) -> Result<String> {
+    let id = field(field(data, 0), 0).as_str().context(
+        "Google Photos did not return the new album's ID; check 'albums' before retrying",
+    )?;
+    crate::client::check_id(id).context("Google Photos returned an invalid album ID")?;
+    Ok(id.to_owned())
+}
+
 pub(crate) fn confirm_album_add(data: &Value, photo_ids: &[String]) -> Result<()> {
     // Older replies echoed the requested IDs in data[4]. Since Nov 2026 data[4] holds new album-item IDs and
     // data[5][0] pairs each requested ID with its album-item ID: [[requested, album_item, 2], ...].
     let echoed = field(data, 4).as_array();
-    let pairs = field(field(data, 5), 0).as_array();
+    // E1Cajb (albums you own) answers [album_id, [album_item, ...], [[[requested, album_item, n], ...]]].
+    let pairs = [field(field(data, 5), 0), field(field(data, 2), 0)];
     let missing = photo_ids
         .iter()
         .filter(|id| {
             let id = Some(id.as_str());
             !(echoed.is_some_and(|items| items.iter().any(|item| item.as_str() == id))
                 || pairs
-                    .is_some_and(|items| items.iter().any(|pair| field(pair, 0).as_str() == id)))
+                    .iter()
+                    .filter_map(|p| p.as_array())
+                    .any(|items| items.iter().any(|pair| field(pair, 0).as_str() == id)))
         })
         .count();
     if missing != 0 {
@@ -1176,5 +1214,34 @@ mod album_tests {
         )
         .is_err());
         assert!(confirm_album_add(&json!([]), &ids).is_err());
+        // E1Cajb (owned album) shape; flag 1 = added, 2 = already there.
+        assert_eq!(
+            owned_album_add_payload("AF1QipExampleAlbum", &ids).to_string(),
+            r#"[["AF1QipExamplePhoto","AF1QipSecondPhoto"],"AF1QipExampleAlbum"]"#
+        );
+        let owned = json!([
+            "AF1QipExampleAlbum",
+            ["AF1QipItemOne", "AF1QipItemTwo"],
+            [[
+                ["AF1QipExamplePhoto", "AF1QipItemOne", 1],
+                ["AF1QipSecondPhoto", "AF1QipItemTwo", 2]
+            ]]
+        ]);
+        assert!(confirm_album_add(&owned, &ids).is_ok());
+        assert!(confirm_album_add(&owned, &["AF1QipThirdPhoto".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn album_create_matches_web_app_and_requires_an_album_id() {
+        assert_eq!(
+            album_create_payload("Family Photos 2026").to_string(),
+            r#"["Family Photos 2026",null,2]"#
+        );
+        assert_eq!(
+            created_album_id(&json!([["AF1QipExampleAlbum", null, 1]])).unwrap(),
+            "AF1QipExampleAlbum"
+        );
+        assert!(created_album_id(&json!([])).is_err());
+        assert!(created_album_id(&json!([["../bad"]])).is_err());
     }
 }

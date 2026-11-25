@@ -1,6 +1,7 @@
 use crate::{
     auth::Session,
     protocol::{self, Photo, RateLimit, SessionExpired},
+    upload,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -378,8 +379,213 @@ impl PhotosClient {
         for id in photo_ids {
             check_id(id)?;
         }
-        let data = self.rpc("laUYf", protocol::album_add_payload(album_id, photo_ids))?;
+        // laUYf is what the web app sent for a shared album; Google rejects it (code 3,
+        // INVALID_ARGUMENT) for an album only you own, which takes E1Cajb. Both are idempotent.
+        let data = match self.rpc("laUYf", protocol::album_add_payload(album_id, photo_ids)) {
+            Err(error)
+                if error
+                    .downcast_ref::<protocol::RpcRejected>()
+                    .is_some_and(|e| e.0 == 3) =>
+            {
+                self.rpc(
+                    "E1Cajb",
+                    protocol::owned_album_add_payload(album_id, photo_ids),
+                )?
+            }
+            other => other?,
+        };
         protocol::confirm_album_add(&data, photo_ids)
+    }
+
+    /// The one album with this exact, case-sensitive title, if any. More than one is an error.
+    pub fn find_album(&mut self, title: &str) -> Result<Option<String>> {
+        let mut matches = self
+            .albums()?
+            .into_iter()
+            .filter(|album| album.title.as_deref() == Some(title));
+        let found = matches.next().map(|album| album.id);
+        if matches.next().is_some() {
+            bail!("More than one album is titled {title:?}. Run 'albums' and use --album-id");
+        }
+        Ok(found)
+    }
+
+    /// Create an empty album (`OXvT9d`; a write) unless one with this exact title exists.
+    /// Returns the album ID and whether it was created. Never creates a duplicate title.
+    pub fn find_or_create_album(&mut self, title: &str) -> Result<(String, bool)> {
+        if title.trim().is_empty() {
+            bail!("Album title cannot be empty");
+        }
+        if let Some(id) = self.find_album(title)? {
+            return Ok((id, false));
+        }
+        let data = self.rpc("OXvT9d", protocol::album_create_payload(title))?;
+        Ok((protocol::created_album_id(&data)?, true))
+    }
+
+    /// Library items that already hold a file with this SHA-1 (`swbisb`; read-only).
+    pub fn find_by_hash(&mut self, sha1: &str) -> Result<Vec<upload::Stored>> {
+        let data = self.rpc("swbisb", upload::hash_lookup_payload(sha1))?;
+        Ok(upload::parse_stored(&data))
+    }
+
+    /// Send one file with Google's resumable upload protocol and return the upload token.
+    /// Nothing is in the library until `commit_upload`.
+    pub fn upload_bytes(&mut self, file: &upload::LocalFile) -> Result<String> {
+        let start_url = format!(
+            "https://photos.google.com{}?authuser={}",
+            upload::UPLOAD_PATH,
+            self.session.account_index
+        );
+        let name = upload::header_filename(&file.name);
+        let hash = format!("sha1={}", file.sha1);
+        let start = self.upload_post(
+            &start_url,
+            &[
+                ("x-goog-hash", hash.as_str()),
+                ("x-goog-upload-protocol", "resumable"),
+                ("x-goog-upload-file-name", name.as_str()),
+                (
+                    "x-goog-upload-header-content-length",
+                    &file.size.to_string(),
+                ),
+                ("x-goog-upload-command", "start"),
+            ],
+            upload::start_body(file.size),
+            "active",
+        )?;
+        let header = |name: &str| {
+            start
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let target = header("x-goog-upload-url").context(
+            "Google Photos did not return an upload address; the web upload protocol may have changed",
+        )?;
+        let parsed = url::Url::parse(&target)
+            .ok()
+            .filter(|u| allowed_host(u) && u.path() == upload::UPLOAD_PATH);
+        if parsed.is_none() {
+            bail!("Refusing an unexpected Google Photos upload address");
+        }
+        let step = header("x-goog-upload-chunk-granularity")
+            .and_then(|g| g.parse::<u64>().ok())
+            .filter(|g| (1..=upload::CHUNK).contains(g))
+            .unwrap_or(upload::GRANULARITY);
+        let chunk = (upload::CHUNK / step * step).max(step);
+        let mut source = std::fs::File::open(&file.path)
+            .with_context(|| format!("{}: cannot open", file.path.display()))?;
+        let mut offset = 0u64;
+        loop {
+            let want = chunk.min(file.size - offset);
+            let mut piece = Vec::with_capacity(want as usize);
+            (&mut source)
+                .take(want)
+                .read_to_end(&mut piece)
+                .with_context(|| format!("{}: read failed", file.path.display()))?;
+            if piece.len() as u64 != want || want == 0 {
+                bail!("{} changed while uploading", file.path.display());
+            }
+            let last = offset + want >= file.size;
+            let response = self.upload_post(
+                &target,
+                &[
+                    ("x-goog-hash", hash.as_str()),
+                    ("x-goog-upload-file-name", name.as_str()),
+                    ("x-goog-upload-offset", &offset.to_string()),
+                    (
+                        "x-goog-upload-command",
+                        if last { "upload, finalize" } else { "upload" },
+                    ),
+                ],
+                piece,
+                if last { "final" } else { "active" },
+            )?;
+            offset += want;
+            if last {
+                let token = network(response.text())?.trim().to_owned();
+                upload::check_token(&token)?;
+                return Ok(token);
+            }
+        }
+    }
+
+    fn upload_post(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+        expected_status: &str,
+    ) -> Result<reqwest::blocking::Response> {
+        let mut request = self
+            .http
+            .post(url)
+            .timeout(Duration::from_secs(600))
+            .header("origin", "https://photos.google.com")
+            .header("referer", "https://photos.google.com/")
+            .header(
+                "content-type",
+                "application/x-www-form-urlencoded;charset=UTF-8",
+            )
+            .body(body);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = network(request.send());
+        self.last_request = Instant::now();
+        let response = response?;
+        let status = response.status();
+        if status.as_u16() == 429 {
+            let delay = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|value| retry_after(value, chrono::Utc::now()));
+            return Err(RateLimit {
+                source: "upload HTTP 429",
+                retry_after: delay,
+            }
+            .into());
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || response.url().host_str() == Some("accounts.google.com")
+        {
+            return Err(SessionExpired.into());
+        }
+        if status.as_u16() == 413 {
+            bail!("Google Photos does not accept a file this large");
+        }
+        if !status.is_success() {
+            bail!("Google Photos upload returned HTTP {status}");
+        }
+        let upload_status = response
+            .headers()
+            .get("x-goog-upload-status")
+            .and_then(|v| v.to_str().ok());
+        if upload_status != Some(expected_status) {
+            bail!(
+                "Google Photos upload status was {:?}, expected {expected_status:?}; the web upload protocol may have changed",
+                upload_status.unwrap_or("missing")
+            );
+        }
+        Ok(response)
+    }
+
+    /// Create the library item from an upload token (`mdpdU`; the write). Never retried.
+    pub fn commit_upload(
+        &mut self,
+        token: &str,
+        file: &upload::LocalFile,
+    ) -> Result<upload::Stored> {
+        let data = self.rpc(
+            "mdpdU",
+            upload::commit_payload(token, &file.name, file.modified_ms),
+        )?;
+        upload::parse_stored(&data).into_iter().next().context(
+            "Google Photos accepted the upload but returned no media key; check the library before retrying",
+        )
     }
 
     pub fn people(&mut self) -> Result<Vec<protocol::Person>> {
@@ -1083,6 +1289,71 @@ mod tests {
         assert!(resumed.complete);
         assert_eq!(resumed.items.len(), 1);
         assert_eq!(resumed.items[0].id, "second");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn album_add_falls_back_to_the_owned_album_rpc_when_google_rejects_the_shared_one() {
+        use std::{
+            io::{BufRead, BufReader},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let owned = json!([
+                "AF1QipExampleAlbum",
+                ["AF1QipItemOne"],
+                [[["AF1QipExamplePhoto", "AF1QipItemOne", 1]]]
+            ]);
+            let responses = [
+                (
+                    "laUYf",
+                    r#"[["wrb.fr","laUYf",null,null,null,[3]]]"#.to_owned(),
+                ),
+                (
+                    "E1Cajb",
+                    json!([["wrb.fr", "E1Cajb", owned.to_string()]]).to_string(),
+                ),
+            ];
+            for (rpc, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.contains(&format!("rpcids={rpc}")), "{line}");
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request_body = vec![0; length];
+                reader.read_exact(&mut request_body).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let mut client = PhotosClient {
+            http: Client::builder().no_proxy().build().unwrap(),
+            cookies: Arc::new(CookieStoreMutex::default()),
+            session: Session::new(&cookie_store::CookieStore::default(), 0, None).unwrap(),
+            globals: json!({"Im6cmf":"/_","FdrFJe":"","cfb2h":"","SNlM0e":""}),
+            last_request: Instant::now(),
+            rpc_endpoint: Some(endpoint),
+        };
+        client
+            .add_to_album("AF1QipExampleAlbum", &["AF1QipExamplePhoto".to_owned()])
+            .unwrap();
         server.join().unwrap();
     }
 
