@@ -1,6 +1,6 @@
 [package]
 name = "google-photos-web-cli"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -29,6 +29,7 @@ sha2 = "0.10"
 base64 = "0.22"
 dotenvy = "0.15"
 sha1 = "0.10"
+chrono-tz = { version = "0.10", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

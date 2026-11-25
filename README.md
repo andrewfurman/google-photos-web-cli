@@ -2,7 +2,8 @@
 
 An unofficial **Rust CLI for Google Photos**. Search your library the way you would in Google Photos,
 inspect camera/location/people metadata and every detected face, tag an untagged face with an existing
-person, download full-size photos and videos, upload files from your computer, and create albums.
+person, download full-size photos and videos, upload files from your computer, create albums, and change
+when photos were taken.
 The command is `google-photos-web-cli`.
 
 **macOS, Linux, and Windows** support portable session and cookie-file imports.
@@ -269,9 +270,38 @@ Creates an album with that exact title. If exactly one album already has the tit
 that album is reused (JSON `created: false`). If several do, nothing changes. Photo
 IDs given after the name are added to it.
 
+### Change when photos were taken
+
+```bash
+google-photos-web-cli set-date PHOTO_ID --date 2026-11-22T10:00 --dry-run
+google-photos-web-cli set-date PHOTO_ID_1 PHOTO_ID_2 --date "2026-11-22 10:00" --tz America/New_York
+google-photos-web-cli set-date --album "Trip 2026" --date 2026-11-22T10:00 --keep-spacing --dry-run
+google-photos-web-cli set-date --album-id ALBUM_ID --shift +1y --json
+google-photos-web-cli set-date PHOTO_ID --date 2025-11-29T18:54:30-05:00     # put an old time back
+```
+
+The same edit as Info → Edit date & time on photos.google.com (one `DaSgWe` request per
+50 photos). Pick photos by ID, or every item of one album with `--album TITLE` /
+`--album-id ID`, and exactly one of:
+
+- **`--date YYYY-MM-DD[THH:MM[:SS]]`** gives every photo that wall-clock time (a date
+  alone means 00:00). The UTC offset comes from an offset written in the date
+  (`-05:00`, `Z`), else `--offset ±HH:MM`, else `--tz ZONE` (IANA name; daylight saving
+  applied for that date), else each photo keeps its current offset.
+- **`--date … --keep-spacing`** moves the earliest photo to `--date` and every other
+  photo by the same amount, like editing several selected photos at once in the web app.
+- **`--shift AMOUNT`** moves each photo's own clock: `+1y`, `-1y2mo`, `+3d`, `-2h30m`,
+  `+90s` (units `y`, `mo`, `w`, `d`, `h`, `m`, `s`); offsets stay as they are.
+
+Each photo is listed with its old time, new time and status (`changed`, `unchanged`,
+`would_change` with `--dry-run`, `failed`). After writing, every changed photo is read
+back and compared with the requested time and offset; any mismatch is `failed` and the
+exit code is 1. Photos already at the new time are not written. Google stores whole
+seconds. There is no undo command: set the `old_taken_at` value printed for each photo.
+
 ### Tag a face with an existing person
 
-`google-photos-web-cli tag` is the only command that changes your library. It assigns one
+`google-photos-web-cli tag` assigns one
 detected face to an existing face group, the same edit as Info → People → Edit
 faces → Add → person → Done on photos.google.com.
 
@@ -458,11 +488,12 @@ google-photos-web-cli inspect AF1QipExamplePhotoId --json
 google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
 google-photos-web-cli tag AF1QipExamplePhotoId --face 0 --person "Jane Doe" --dry-run
 google-photos-web-cli upload IMG_0001.jpg --album "Trip 2026" --create-album --dry-run
+google-photos-web-cli set-date --album "Trip 2026" --date 2026-11-22T10:00 --keep-spacing --dry-run
 ```
 
 Exit codes: 0 success, 1 runtime error, 2 bad command line (the error ends with
-a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add` and
-`tag` change your library; preview them with `--dry-run`.
+a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add`,
+`tag` and `set-date` change your library; preview them with `--dry-run`.
 
 | Command | Purpose |
 | --- | --- |
@@ -484,6 +515,7 @@ a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add` 
 | `album-add PHOTO_ID... --album TITLE --yes` | Add photos to an existing album (writes; `--dry-run` available) |
 | `album-create NAME [PHOTO_ID...]` | Create an album, or reuse the one with that exact title (writes; `--dry-run` available) |
 | `upload FILE... [--album TITLE [--create-album]]` | Upload photos/videos; reports media key and duplicate per file (writes; `--dry-run` available) |
+| `set-date PHOTO_ID... \| --album TITLE (--date DATETIME [--keep-spacing] \| --shift AMOUNT)` | Change capture date/time; verified by reading back (writes; `--dry-run` available) |
 
 ## Limitations and troubleshooting
 
