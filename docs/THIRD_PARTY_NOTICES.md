@@ -41,3 +41,11 @@ upload, `mdpdU` commit) follows the protocol description in
 album) payloads follow [xob0t/Google-Photos-Toolkit](https://github.com/xob0t/Google-Photos-Toolkit)
 `src/api/api.ts` (MIT). The Rust code is new; both were checked against the live web app
 in November 2026.
+
+## Date edits and album pages
+
+The `DaSgWe` (edit date & time) and `snAcKc` (album page) request shapes follow
+[xob0t/Google-Photos-Toolkit](https://github.com/xob0t/Google-Photos-Toolkit)
+`src/api/api.ts` `setItemsTimestamp` / `getAlbumPage` (MIT); gpwc's `SetItemTimestamp`
+documents the same RPC with milliseconds, but a live check in November 2026 showed seconds.
+The Rust code is new.

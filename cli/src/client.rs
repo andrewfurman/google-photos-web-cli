@@ -1,5 +1,6 @@
 use crate::{
     auth::Session,
+    dates,
     protocol::{self, Photo, RateLimit, SessionExpired},
     upload,
 };
@@ -421,6 +422,76 @@ impl PhotosClient {
         }
         let data = self.rpc("OXvT9d", protocol::album_create_payload(title))?;
         Ok((protocol::created_album_id(&data)?, true))
+    }
+
+    /// Every item ID in an album (`snAcKc` pages; read-only), in album order.
+    pub fn album_item_ids(&mut self, album_id: &str) -> Result<Vec<String>> {
+        check_id(album_id).context("Invalid album ID")?;
+        let mut ids = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut token: Option<String> = None;
+        loop {
+            let data = self.rpc(
+                "snAcKc",
+                dates::album_page_payload(album_id, token.as_deref()),
+            )?;
+            let (page, next) = dates::parse_album_page(&data)?;
+            ids.extend(page.into_iter().filter(|id| seen_ids.insert(id.clone())));
+            let Some(next) = next else {
+                return Ok(ids);
+            };
+            if !seen_tokens.insert(next.clone()) {
+                bail!("Google Photos repeated an album continuation token");
+            }
+            token = Some(next);
+        }
+    }
+
+    /// Current capture date, offset and item key of each photo (`fDcn4b`, batched; read-only).
+    /// One unreadable photo fails only its own entry.
+    pub fn dated_items(&mut self, ids: &[String]) -> Result<Vec<Result<dates::DatedItem>>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(20) {
+            for id in chunk {
+                check_id(id)?;
+            }
+            let payloads: Vec<Value> = chunk
+                .iter()
+                .map(|id| json!([id, 1, null, null, 1]))
+                .collect();
+            match self.rpc_batch("fDcn4b", &payloads) {
+                Ok(values) => out.extend(
+                    values
+                        .iter()
+                        .zip(chunk)
+                        .map(|(ext, id)| dates::parse_dated(ext, id)),
+                ),
+                // Google rejects the whole batch for one bad ID: retry one at a time.
+                Err(error) if error.is::<protocol::RpcRejected>() => {
+                    for (id, payload) in chunk.iter().zip(payloads) {
+                        out.push(match self.rpc("fDcn4b", payload) {
+                            Ok(ext) => dates::parse_dated(&ext, id),
+                            Err(e) if e.is::<protocol::RpcRejected>() => {
+                                Err(e.context("Google Photos could not read this photo"))
+                            }
+                            Err(e) => return Err(e),
+                        });
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Change capture dates (`DaSgWe`; a write), like Info > Edit date & time.
+    /// The caller verifies the result by reading the items again.
+    pub fn set_dates(&mut self, changes: &[(&dates::DatedItem, dates::Target)]) -> Result<()> {
+        for chunk in changes.chunks(dates::WRITE_BATCH) {
+            self.rpc("DaSgWe", dates::write_payload(chunk))?;
+        }
+        Ok(())
     }
 
     /// Library items that already hold a file with this SHA-1 (`swbisb`; read-only).

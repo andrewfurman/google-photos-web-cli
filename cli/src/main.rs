@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use google_photos_web_cli::{
     auth::{self, Session},
     client::{self, PhotosClient, SearchOptions, SearchSort},
-    keepalive,
+    dates, keepalive,
     protocol::SessionExpired,
 };
 use std::path::PathBuf;
@@ -41,6 +41,7 @@ COMMANDS:
     album-create NAME       Create an album (or reuse the one with that name)
     album-add PHOTO_ID...   Add photos to an existing album
     tag PHOTO_ID            Tag a detected face with an existing person
+    set-date PHOTO_ID...    Change when photos were taken (or a whole --album)
 
 EXAMPLES:
   google-photos-web-cli search "birthday cake"
@@ -55,11 +56,12 @@ EXAMPLES:
   google-photos-web-cli inspect AF1QipExamplePhotoId --json
   google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
   google-photos-web-cli tag AF1QipExamplePhotoId --face 0 --person "Jane Doe" --dry-run
+  google-photos-web-cli set-date --album "Trip" --date 2026-11-22T10:00 --keep-spacing --dry-run
 
 MORE HELP:  google-photos-web-cli <command> --help   (or: help <command>, e.g. help search)
 OUTPUT:     readable text by default; --json on search, people, inspect, download,
-            albums, album-add, album-create, upload, tag and auth status gives JSON.
-SAFETY:     Add --dry-run to preview upload, album-create, album-add and tag.
+            albums, album-add, album-create, upload, tag, set-date and auth status.
+SAFETY:     Add --dry-run to preview upload, album-create, album-add, tag, set-date.
             Album additions require --yes. Uploads skip files already in the library.
             Downloads never overwrite files. 'auth export' prints credentials:
             treat the result like a password. Sessions can expire or be revoked by
@@ -239,6 +241,33 @@ with the same person is left unchanged. New people cannot be created here.
 automatically, and the change is confirmed from Google's response."#
     )]
     Tag(TagArgs),
+    /// Change when photos were taken, like Info > Edit date & time (writes to your library)
+    #[command(
+        after_help = r#"Examples (WRITES to your library unless --dry-run; this CLI has no undo):
+  google-photos-web-cli set-date PHOTO_ID --date 2026-11-22T10:00 --dry-run
+  google-photos-web-cli set-date PHOTO_ID_1 PHOTO_ID_2 --date "2026-11-22 10:00" --tz America/New_York
+  google-photos-web-cli set-date PHOTO_ID --date 2025-11-29T18:54:30-05:00 --json
+  google-photos-web-cli set-date --album "Trip 2026" --date 2026-11-22T10:00 --keep-spacing
+  google-photos-web-cli set-date --album-id ALBUM_ID --shift +1y --dry-run
+  google-photos-web-cli set-date PHOTO_ID --shift -2h30m
+
+Choose photos (PHOTO_ID... from 'search'/'upload', or every item of one album
+with --album/--album-id) and exactly one of --date or --shift.
+
+--date YYYY-MM-DD[THH:MM[:SS]] gives every photo that wall-clock time (a date
+alone means 00:00). Time zone: an offset written in the date (-05:00, Z), else
+--offset, else --tz (daylight saving applied for that date), else each photo
+keeps its current offset. --keep-spacing moves the earliest photo to --date and
+the others by the same amount, like editing several photos at once in the web
+app. --shift moves each photo's own clock: +1y, -1y2mo, +3d, -2h30m, +90s
+(units y, mo, w, d, h, m, s); offsets stay as they are.
+
+Google stores whole seconds. Photos already at the new time are skipped.
+Every change is re-read afterwards: each photo is listed with its old time, new
+time and status (changed, unchanged, would_change, failed); any failure exits 1.
+Undo by setting the old time printed here (it includes the offset)."#
+    )]
+    SetDate(SetDateArgs),
     /// Remove the CLI's saved session (does not sign Chrome out)
     #[command(
         after_help = "Examples:\n  google-photos-web-cli logout\n  google-photos-web-cli --session-file ./work.env logout\n\nDeletes only the saved session file contents (same as 'auth logout'). Exported copies stay valid and your browser stays signed in."
@@ -783,6 +812,196 @@ fn run_album_add(mut args: AlbumAddArgs) -> Result<()> {
 }
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("change").required(true).args(["date", "shift"]))]
+struct SetDateArgs {
+    /// Photo IDs from 'search' or 'upload' (or use --album/--album-id)
+    #[arg(value_name = "PHOTO_ID", required_unless_present_any = ["album", "album_id"], conflicts_with_all = ["album", "album_id"])]
+    photo_ids: Vec<String>,
+    /// Change every item in the album with this exact, case-sensitive title
+    #[arg(long, conflicts_with = "album_id")]
+    album: Option<String>,
+    /// Change every item in this album ID from 'albums'
+    #[arg(long)]
+    album_id: Option<String>,
+    /// New time: YYYY-MM-DD[THH:MM[:SS]], optionally ending in Z or an offset like -05:00
+    #[arg(long, value_name = "DATETIME")]
+    date: Option<String>,
+    /// IANA time zone for --date, e.g. America/New_York (daylight saving applied)
+    #[arg(long, value_name = "ZONE", conflicts_with = "offset")]
+    tz: Option<String>,
+    /// Fixed UTC offset for --date, e.g. -05:00 or +0530
+    #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+    offset: Option<String>,
+    /// Move the earliest photo to --date and the others by the same amount
+    #[arg(long, requires = "date")]
+    keep_spacing: bool,
+    /// Move each photo's time by this much instead: +1y, -1y2mo, +3d, -2h30m (y, mo, w, d, h, m, s)
+    #[arg(long, value_name = "AMOUNT", allow_hyphen_values = true, conflicts_with_all = ["tz", "offset", "keep_spacing"])]
+    shift: Option<String>,
+    /// Show old and new times without changing anything
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(serde::Serialize)]
+struct DateReport {
+    id: String,
+    filename: Option<String>,
+    old_taken_at: Option<String>,
+    new_taken_at: Option<String>,
+    status: &'static str,
+    error: Option<String>,
+}
+
+fn date_plan(args: &SetDateArgs) -> Result<(dates::Plan, dates::Zone)> {
+    if let Some(shift) = &args.shift {
+        return Ok((
+            dates::Plan::Shift(dates::parse_shift(shift)?),
+            dates::Zone::Keep,
+        ));
+    }
+    let (local, written) =
+        dates::parse_date(args.date.as_deref().context("Choose --date or --shift")?)?;
+    let zone = match (written, &args.offset, &args.tz) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            bail!("--date already has an offset; drop --offset/--tz or the offset in --date")
+        }
+        (Some(offset), _, _) => dates::Zone::Fixed(offset),
+        (None, Some(offset), _) => dates::Zone::Fixed(dates::parse_offset(offset)?),
+        (None, None, Some(tz)) => dates::Zone::Named(dates::parse_zone(tz)?),
+        (None, None, None) => dates::Zone::Keep,
+    };
+    let plan = if args.keep_spacing {
+        dates::Plan::KeepSpacing(local)
+    } else {
+        dates::Plan::Set(local)
+    };
+    Ok((plan, zone))
+}
+
+fn run_set_date(mut args: SetDateArgs) -> Result<()> {
+    for id in &args.photo_ids {
+        client::check_id(id)?;
+    }
+    if let Some(id) = &args.album_id {
+        client::check_id(id).context("Invalid album ID")?;
+    }
+    if args.album.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        bail!("Album title cannot be empty");
+    }
+    let (plan, zone) = date_plan(&args)?;
+    let mut seen = std::collections::HashSet::new();
+    args.photo_ids.retain(|id| seen.insert(id.clone()));
+
+    let reports = with_saved(|client| {
+        let ids = match (&args.album_id, &args.album) {
+            (Some(id), _) => client.album_item_ids(id)?,
+            (None, Some(title)) => {
+                let id = client.find_album(title)?.with_context(|| {
+                    format!("No album titled {title:?} in the album picker. Run 'albums'")
+                })?;
+                client.album_item_ids(&id)?
+            }
+            (None, None) => args.photo_ids.clone(),
+        };
+        if ids.is_empty() {
+            bail!("The album is empty; nothing to change");
+        }
+        let mut reports = Vec::new();
+        let mut items = Vec::new();
+        for (id, read) in ids.iter().zip(client.dated_items(&ids)?) {
+            match read {
+                Ok(item) => items.push(item),
+                Err(e) => reports.push(DateReport {
+                    id: id.clone(),
+                    filename: None,
+                    old_taken_at: None,
+                    new_taken_at: None,
+                    status: "failed",
+                    error: Some(format!("{e:#}")),
+                }),
+            }
+        }
+        // An album item ID and a library ID can name the same photo: change it once.
+        let mut keys = std::collections::HashSet::new();
+        items.retain(|item| keys.insert(item.dedup_key.clone()));
+        // Plan before writing anything so a bad date (e.g. in a DST gap) changes nothing.
+        let targets = dates::plan(&items, &plan, zone)?;
+        let changes: Vec<(&dates::DatedItem, dates::Target)> = items
+            .iter()
+            .zip(targets.iter().copied())
+            .filter(|(item, t)| !t.matches(item))
+            .collect();
+        let mut after = std::collections::HashMap::new();
+        if !args.dry_run && !changes.is_empty() {
+            client.set_dates(&changes)?;
+            let changed: Vec<String> = changes.iter().map(|(i, _)| i.id.clone()).collect();
+            for (id, read) in changed.iter().zip(client.dated_items(&changed)?) {
+                after.insert(id.clone(), read);
+            }
+        }
+        for (item, target) in items.iter().zip(targets) {
+            let (status, error) = if target.matches(item) {
+                ("unchanged", None)
+            } else if args.dry_run {
+                ("would_change", None)
+            } else {
+                match after.get(&item.id) {
+                    Some(Ok(now)) if target.matches(now) => ("changed", None),
+                    Some(Ok(now)) => (
+                        "failed",
+                        Some(format!("Google still reports {}", now.taken_at())),
+                    ),
+                    Some(Err(e)) => ("failed", Some(format!("could not re-read: {e:#}"))),
+                    None => ("failed", Some("not re-read".to_owned())),
+                }
+            };
+            reports.push(DateReport {
+                id: item.id.clone(),
+                filename: item.filename.clone(),
+                old_taken_at: Some(item.taken_at()),
+                new_taken_at: Some(target.taken_at()),
+                status,
+                error,
+            });
+        }
+        Ok(reports)
+    })?;
+    let failed = reports.iter().filter(|r| r.status == "failed").count();
+    if args.json {
+        print_json(&serde_json::json!({
+            "status": if args.dry_run { "dry_run" } else if failed > 0 { "partial" } else { "done" },
+            "items": reports,
+        }))?;
+    } else {
+        for r in &reports {
+            println!(
+                "{:<12} {}  {}  {} -> {}{}",
+                r.status,
+                r.id,
+                r.filename.as_deref().unwrap_or("-"),
+                r.old_taken_at.as_deref().unwrap_or("?"),
+                r.new_taken_at.as_deref().unwrap_or("?"),
+                r.error
+                    .as_deref()
+                    .map(|e| format!("  ({e})"))
+                    .unwrap_or_default()
+            );
+        }
+        if args.dry_run {
+            println!("Dry run: nothing was changed.");
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} photo(s) failed", reports.len());
+    }
+    Ok(())
+}
+
+#[derive(Args)]
 #[command(group = clap::ArgGroup::new("target_face").required(true).args(["face", "face_id"]))]
 #[command(group = clap::ArgGroup::new("target_person").required(true).args(["person", "person_id"]))]
 struct TagArgs {
@@ -1257,6 +1476,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::AlbumAdd(args) => run_album_add(args)?,
         Command::AlbumCreate(args) => run_album_create(args)?,
         Command::Upload(args) => run_upload(args)?,
+        Command::SetDate(args) => run_set_date(args)?,
         Command::Tag(args) => {
             client::check_id(&args.id)?;
             with_saved(|client| run_tag(client, &args))?;
@@ -1588,5 +1808,61 @@ mod argument_tests {
             panic!("wrong command")
         };
         assert_eq!(args.query.as_deref(), Some(query));
+    }
+
+    #[test]
+    fn set_date_accepts_photos_or_an_album_and_hyphenated_values() {
+        let cli = Cli::try_parse_from([
+            "google-photos-web-cli",
+            "set-date",
+            "--album",
+            "Family Photos 2026",
+            "--date",
+            "2026-11-22T10:00",
+            "--offset",
+            "-05:00",
+            "--keep-spacing",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        let Command::SetDate(args) = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(args.album.as_deref(), Some("Family Photos 2026"));
+        assert_eq!(args.offset.as_deref(), Some("-05:00"));
+        assert!(args.keep_spacing && args.dry_run && args.json && args.photo_ids.is_empty());
+        let (plan, zone) = date_plan(&args).unwrap();
+        assert!(matches!(plan, dates::Plan::KeepSpacing(_)));
+        assert!(matches!(zone, dates::Zone::Fixed(o) if o.local_minus_utc() == -18000));
+
+        let cli = Cli::try_parse_from([
+            "google-photos-web-cli",
+            "set-date",
+            "AF1QipSyntheticPhoto",
+            "--shift",
+            "-2h30m",
+        ])
+        .unwrap();
+        let Command::SetDate(args) = cli.command else {
+            panic!("wrong command")
+        };
+        let (plan, _) = date_plan(&args).unwrap();
+        assert!(matches!(plan, dates::Plan::Shift(s) if s.seconds == -9000));
+
+        let cli = Cli::try_parse_from([
+            "google-photos-web-cli",
+            "set-date",
+            "AF1QipSyntheticPhoto",
+            "--date",
+            "2025-11-29T18:54:30-05:00",
+            "--tz",
+            "America/New_York",
+        ])
+        .unwrap();
+        let Command::SetDate(args) = cli.command else {
+            panic!("wrong command")
+        };
+        assert!(date_plan(&args).is_err(), "two time zones for one date");
     }
 }
