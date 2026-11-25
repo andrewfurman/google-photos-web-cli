@@ -4,3 +4,4 @@ pub mod keepalive;
 pub mod protocol;
 
 pub mod search;
+pub mod upload;

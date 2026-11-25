@@ -31,3 +31,13 @@ SOFTWARE.
 ```
 
 Runtime dependencies retain their respective licenses.
+
+## Upload and album-creation request shapes
+
+The upload flow (`swbisb` hash check, resumable `/_/upload/uploadmedia/interactive`
+upload, `mdpdU` commit) follows the protocol description in
+[benjamin-di/google-photos-mcp](https://github.com/benjamin-di/google-photos-mcp)
+`docs/PAYLOADS.md` (MIT). The `OXvT9d` (create album) and `E1Cajb` (add to an owned
+album) payloads follow [xob0t/Google-Photos-Toolkit](https://github.com/xob0t/Google-Photos-Toolkit)
+`src/api/api.ts` (MIT). The Rust code is new; both were checked against the live web app
+in November 2026.

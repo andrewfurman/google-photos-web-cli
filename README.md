@@ -2,7 +2,8 @@
 
 An unofficial **Rust CLI for Google Photos**. Search your library the way you would in Google Photos,
 inspect camera/location/people metadata and every detected face, tag an untagged face with an existing
-person, and download full-size photos and videos. The command is `google-photos-web-cli`.
+person, download full-size photos and videos, upload files from your computer, and create albums.
+The command is `google-photos-web-cli`.
 
 **macOS, Linux, and Windows** support portable session and cookie-file imports.
 Direct import from Chrome's encrypted cookie database is currently macOS-only.
@@ -228,6 +229,46 @@ a shared destination album can see photos added to it. Both commands support
 `--json`. The CLI sends one write and checks Google's response for every
 requested photo. If any are unconfirmed, check the destination before retrying.
 
+### Upload photos and videos
+
+```bash
+google-photos-web-cli upload IMG_0001.jpg clip.mp4 --dry-run
+google-photos-web-cli upload IMG_0001.jpg clip.mp4
+google-photos-web-cli upload ./trip/*.jpg --album "Trip 2026" --create-album --json
+```
+
+`upload` does what "Import photos from your computer" does on photos.google.com, with
+the same web session (no API key): a resumable upload to
+`/_/upload/uploadmedia/interactive`, then one `mdpdU` request that creates the item.
+For each file it reports the media key (the `PHOTO_ID` other commands take) and whether
+it was a duplicate. Before uploading, the file's SHA-1 is checked against your library
+(`swbisb`), and a file that is already there is not sent again, so re-running a batch is
+safe. One failed file doesn't stop the others; the exit code is then 1. A rate limit or
+expired session stops the remaining files.
+
+- **Formats:** JPEG, PNG, GIF, WebP, HEIC/AVIF, BMP, TIFF/raw, MP4, MOV, AVI,
+  MKV/WebM, WMV and MPEG, recognized by content.
+- **Dates:** Google uses the file's EXIF capture date. Without one, it uses the
+  file's modified time, so set the mtime first (`touch -d`) if it matters.
+- **Quality:** uploads follow the account's backup quality setting. With
+  Storage saver, Google stores a recompressed copy, not the original bytes.
+- **Albums:** `--album TITLE` (exact, case-sensitive) or `--album-id ID` adds
+  every uploaded or duplicate file after the uploads. `--create-album` creates the
+  title if no album has it, and never makes a second album with the same title.
+- **`--dry-run`** hashes the files and checks for duplicates and the album, but
+  uploads and creates nothing.
+
+### Create an album
+
+```bash
+google-photos-web-cli album-create "Trip 2026" --dry-run
+google-photos-web-cli album-create "Trip 2026" AF1QipExamplePhoto --json
+```
+
+Creates an album with that exact title. If exactly one album already has the title,
+that album is reused (JSON `created: false`). If several do, nothing changes. Photo
+IDs given after the name are added to it.
+
 ### Tag a face with an existing person
 
 `google-photos-web-cli tag` is the only command that changes your library. It assigns one
@@ -416,11 +457,12 @@ google-photos-web-cli search beach --all --json > results.json
 google-photos-web-cli inspect AF1QipExamplePhotoId --json
 google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
 google-photos-web-cli tag AF1QipExamplePhotoId --face 0 --person "Jane Doe" --dry-run
+google-photos-web-cli upload IMG_0001.jpg --album "Trip 2026" --create-album --dry-run
 ```
 
 Exit codes: 0 success, 1 runtime error, 2 bad command line (the error ends with
-a pointer to the relevant `--help`). Only `tag` changes your library; preview it
-with `--dry-run`.
+a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add` and
+`tag` change your library; preview them with `--dry-run`.
 
 | Command | Purpose |
 | --- | --- |
@@ -438,6 +480,10 @@ with `--dry-run`.
 | `inspect PHOTO_ID` | Read photo metadata, people tags, and every detected face |
 | `tag PHOTO_ID --face N --person NAME` | Tag one detected face with an existing person (writes; `--dry-run` available) |
 | `download PHOTO_ID` | Save full-size media |
+| `albums [--json]` | List albums offered by the Add to album picker |
+| `album-add PHOTO_ID... --album TITLE --yes` | Add photos to an existing album (writes; `--dry-run` available) |
+| `album-create NAME [PHOTO_ID...]` | Create an album, or reuse the one with that exact title (writes; `--dry-run` available) |
+| `upload FILE... [--album TITLE [--create-album]]` | Upload photos/videos; reports media key and duplicate per file (writes; `--dry-run` available) |
 
 ## Limitations and troubleshooting
 

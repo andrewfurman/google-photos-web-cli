@@ -1,6 +1,6 @@
 [package]
 name = "google-photos-web-cli"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -28,6 +28,7 @@ url = "2"
 sha2 = "0.10"
 base64 = "0.22"
 dotenvy = "0.15"
+sha1 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -35,7 +36,6 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 pbkdf2 = "0.12"
-sha1 = "0.10"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -37,6 +37,8 @@ COMMANDS:
     inspect PHOTO_ID        Show a photo's metadata and detected faces
     download PHOTO_ID       Save the full-size original
   Change (writes to your library)
+    upload FILE...          Upload photos/videos from this computer
+    album-create NAME       Create an album (or reuse the one with that name)
     album-add PHOTO_ID...   Add photos to an existing album
     tag PHOTO_ID            Tag a detected face with an existing person
 
@@ -47,6 +49,8 @@ EXAMPLES:
   google-photos-web-cli search beach --all --json > results.json
   google-photos-web-cli albums --json
   google-photos-web-cli album-add AF1QipExamplePhotoId --album "Artwork" --dry-run
+  google-photos-web-cli upload IMG_0001.jpg clip.mp4 --album "Trip" --create-album
+  google-photos-web-cli album-create "Trip 2026" --json
   google-photos-web-cli people --name Jane
   google-photos-web-cli inspect AF1QipExamplePhotoId --json
   google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
@@ -54,8 +58,9 @@ EXAMPLES:
 
 MORE HELP:  google-photos-web-cli <command> --help   (or: help <command>, e.g. help search)
 OUTPUT:     readable text by default; --json on search, people, inspect, download,
-            albums, album-add, tag and auth status gives JSON on stdout.
-SAFETY:     Add --dry-run to preview album-add and tag. Album additions require --yes.
+            albums, album-add, album-create, upload, tag and auth status gives JSON.
+SAFETY:     Add --dry-run to preview upload, album-create, album-add and tag.
+            Album additions require --yes. Uploads skip files already in the library.
             Downloads never overwrite files. 'auth export' prints credentials:
             treat the result like a password. Sessions can expire or be revoked by
             Google; if a command says so, sign in again (auth chrome / auth cookies).
@@ -139,6 +144,46 @@ Use one exact, case-sensitive album title or an album ID. Adding photos
 keeps their existing library and album memberships. Members of a shared
 destination album can see photos added to it. --yes applies the change."#)]
     AlbumAdd(AlbumAddArgs),
+    /// Create an album by exact name, or reuse the one that already has it; optionally add photos
+    #[command(after_help = r#"Examples:
+  google-photos-web-cli album-create "Trip 2026" --dry-run
+  google-photos-web-cli album-create "Trip 2026"
+  google-photos-web-cli album-create "Trip 2026" PHOTO_ID_1 PHOTO_ID_2 --json
+
+WRITES to your library unless --dry-run (this CLI has no undo).
+Never makes a duplicate: if exactly one album already has this exact,
+case-sensitive title it is reused; if several do, nothing changes.
+Photo IDs come from 'search' or 'upload'. JSON reports album_id, title,
+created (true/false) and the added photo_ids."#)]
+    AlbumCreate(AlbumCreateArgs),
+    /// Upload photos and videos from this computer to your library (writes to your library)
+    #[command(after_help = r#"Examples:
+  google-photos-web-cli upload IMG_0001.jpg --dry-run
+  google-photos-web-cli upload IMG_0001.jpg IMG_0002.heic clip.mp4
+  google-photos-web-cli upload ./trip/*.jpg --album "Trip 2026" --create-album --json
+  google-photos-web-cli upload scan.png --album-id ALBUM_ID
+
+WRITES to your library unless --dry-run (this CLI has no undo). Works like
+"Import photos from your computer" on photos.google.com: the same web session,
+no API key. Accepts JPEG, PNG, GIF, WebP, HEIC/AVIF, BMP, TIFF/raw, MP4, MOV,
+AVI, MKV/WebM, WMV and MPEG (checked by content, not extension).
+
+Safe to re-run: each file's SHA-1 is checked against your library first and a
+file already there is not uploaded again; it is reported as a duplicate with
+the existing media key. Google may also return an existing item at commit.
+Each file reports its media key (the PHOTO_ID other commands take) and
+duplicate true/false; one failed file does not stop the others, but the exit
+code is 1. Rate limits or an expired session stop the remaining files.
+
+Dates: Google uses the photo's own capture date (EXIF); for a file without
+one it uses the file's modified time. Storage quality follows your account's
+Google Photos backup setting.
+
+--album/--album-id add every uploaded or duplicate file to that album after the
+uploads (exact, case-sensitive title). --create-album creates the --album
+title if no album has it yet (never a duplicate). --dry-run hashes the files
+and checks for duplicates and the album, but uploads and creates nothing."#)]
+    Upload(UploadArgs),
     /// List Google's returned face groups and their IDs (named groups by default)
     #[command(
         after_help = "Examples:\n  google-photos-web-cli people\n  google-photos-web-cli people --name Jane\n  google-photos-web-cli people --include-unnamed --json\n\nUse the IDs with 'search --person-id' and 'tag --person-id'. Read-only."
@@ -354,6 +399,334 @@ struct AlbumAddArgs {
     /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct AlbumCreateArgs {
+    /// Exact, case-sensitive album title; reused if exactly one album has it
+    name: String,
+    /// Optional photo IDs from 'search' or 'upload' to add to the album
+    photo_ids: Vec<String>,
+    /// Show whether the album exists and would be created; change nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_album_create(mut args: AlbumCreateArgs) -> Result<()> {
+    if args.name.trim().is_empty() {
+        bail!("Album title cannot be empty");
+    }
+    for id in &args.photo_ids {
+        client::check_id(id)?;
+    }
+    let mut seen = std::collections::HashSet::new();
+    args.photo_ids.retain(|id| seen.insert(id.clone()));
+    let (album_id, created) = with_saved(|client| {
+        if args.dry_run {
+            return Ok((client.find_album(&args.name)?, false));
+        }
+        let (id, created) = client.find_or_create_album(&args.name)?;
+        if !args.photo_ids.is_empty() {
+            client.add_to_album(&id, &args.photo_ids)?;
+        }
+        Ok((Some(id), created))
+    })?;
+    let status = match (args.dry_run, &album_id, created) {
+        (true, Some(_), _) => "dry_run_exists",
+        (true, None, _) => "dry_run_would_create",
+        (false, _, true) => "created",
+        (false, _, false) => "exists",
+    };
+    if args.json {
+        return print_json(&serde_json::json!({
+            "status": status,
+            "album_id": album_id,
+            "title": args.name,
+            "created": created,
+            "photo_ids": args.photo_ids,
+        }));
+    }
+    match (status, album_id) {
+        ("dry_run_would_create", _) => println!("Dry run: would create album {:?}.", args.name),
+        (_, Some(id)) if status == "dry_run_exists" => {
+            println!(
+                "Dry run: album {:?} already exists ({id}); it would be reused.",
+                args.name
+            )
+        }
+        (_, Some(id)) => println!(
+            "{} album {:?}: {id}",
+            if created {
+                "Created"
+            } else {
+                "Reusing existing"
+            },
+            args.name
+        ),
+        _ => {}
+    }
+    if !args.photo_ids.is_empty() {
+        if args.dry_run {
+            println!("Would add {} photo(s).", args.photo_ids.len());
+        } else {
+            println!(
+                "Google Photos confirmed {} photo(s) in the album.",
+                args.photo_ids.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Args)]
+struct UploadArgs {
+    /// Photo or video files to upload
+    #[arg(required = true, num_args = 1.., value_name = "FILE")]
+    files: Vec<PathBuf>,
+    /// Add the uploads to the album with this exact, case-sensitive title
+    #[arg(long, conflicts_with = "album_id")]
+    album: Option<String>,
+    /// Add the uploads to this album ID from 'albums'
+    #[arg(long)]
+    album_id: Option<String>,
+    /// Create the --album title if no album has it yet (never a duplicate)
+    #[arg(long, requires = "album")]
+    create_album: bool,
+    /// Hash files and check duplicates and the album; upload and create nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(serde::Serialize)]
+struct UploadReport {
+    path: PathBuf,
+    filename: Option<String>,
+    status: &'static str,
+    media_key: Option<String>,
+    duplicate: Option<bool>,
+    media_type: Option<&'static str>,
+    bytes: Option<u64>,
+    taken_at: Option<String>,
+    uploaded_at: Option<String>,
+    url: Option<String>,
+    error: Option<String>,
+}
+
+impl UploadReport {
+    fn failed(path: PathBuf, error: &anyhow::Error) -> Self {
+        Self {
+            path,
+            filename: None,
+            status: "failed",
+            media_key: None,
+            duplicate: None,
+            media_type: None,
+            bytes: None,
+            taken_at: None,
+            uploaded_at: None,
+            url: None,
+            error: Some(format!("{error:#}")),
+        }
+    }
+}
+
+fn upload_one(
+    client: &mut PhotosClient,
+    file: &google_photos_web_cli::upload::LocalFile,
+    dry_run: bool,
+) -> Result<UploadReport> {
+    let started = chrono::Utc::now().timestamp_millis();
+    let existing = client.find_by_hash(&file.sha1)?.into_iter().next();
+    let (status, stored, duplicate) = match existing {
+        Some(found) => ("duplicate", Some(found), Some(true)),
+        None if dry_run => ("would_upload", None, Some(false)),
+        None => {
+            if !dry_run {
+                eprintln!("Uploading {} ({} bytes)…", file.path.display(), file.size);
+            }
+            let token = client.upload_bytes(file)?;
+            let stored = client.commit_upload(&token, file)?;
+            // Google returns the existing item when it already had the file.
+            let old = stored
+                .uploaded_ms
+                .is_some_and(|ms| ms < started - 10 * 60 * 1000);
+            (
+                if old { "duplicate" } else { "uploaded" },
+                Some(stored),
+                Some(old),
+            )
+        }
+    };
+    Ok(UploadReport {
+        path: file.path.clone(),
+        filename: Some(file.name.clone()),
+        status,
+        url: stored
+            .as_ref()
+            .map(|s| format!("https://photos.google.com/photo/{}", s.media_key)),
+        media_key: stored.as_ref().map(|s| s.media_key.clone()),
+        duplicate,
+        media_type: Some(file.media_type),
+        bytes: Some(file.size),
+        taken_at: stored.as_ref().and_then(|s| s.taken_at.clone()),
+        uploaded_at: stored.and_then(|s| s.uploaded_at),
+        error: None,
+    })
+}
+
+fn run_upload(args: UploadArgs) -> Result<()> {
+    if let Some(id) = &args.album_id {
+        client::check_id(id).context("Invalid album ID")?;
+    }
+    if args.album.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        bail!("Album title cannot be empty");
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut prepared = Vec::new();
+    let mut reports = Vec::new();
+    for path in &args.files {
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        match google_photos_web_cli::upload::prepare(path) {
+            Ok(file) => prepared.push(file),
+            Err(e) => reports.push(UploadReport::failed(path.clone(), &e)),
+        }
+    }
+    if prepared.is_empty() {
+        for r in &reports {
+            eprintln!("{}: {}", r.path.display(), r.error.as_deref().unwrap_or(""));
+        }
+        bail!("No uploadable files; nothing was sent");
+    }
+    let (album_id, album_created, album_error) = with_saved(|client| {
+        // Resolve the album before uploading so a bad name fails before any write.
+        let mut album_id = match (&args.album_id, &args.album) {
+            (Some(id), _) => Some(id.clone()),
+            (None, Some(title)) => match client.find_album(title)? {
+                Some(id) => Some(id),
+                None if args.create_album => None,
+                None => bail!("No album titled {title:?} in the album picker. Add --create-album to create it, or run 'albums'"),
+            },
+            (None, None) => None,
+        };
+        let mut stop: Option<String> = None;
+        for file in &prepared {
+            if let Some(reason) = &stop {
+                reports.push(UploadReport::failed(
+                    file.path.clone(),
+                    &anyhow::anyhow!("not attempted: {reason}"),
+                ));
+                continue;
+            }
+            match upload_one(client, file, args.dry_run) {
+                Ok(report) => reports.push(report),
+                Err(e) => {
+                    if e.is::<SessionExpired>()
+                        || e.is::<google_photos_web_cli::protocol::RateLimit>()
+                    {
+                        stop = Some(format!("{e}"));
+                    }
+                    reports.push(UploadReport::failed(file.path.clone(), &e));
+                }
+            }
+        }
+        let keys: Vec<String> = reports.iter().filter_map(|r| r.media_key.clone()).collect();
+        let mut created = false;
+        // An album failure must not hide which files were uploaded: report it after the files.
+        let mut album_error = None;
+        if !args.dry_run && !keys.is_empty() {
+            let add = || -> Result<()> {
+                if let (None, Some(title)) = (&album_id, &args.album) {
+                    let (id, made) = client.find_or_create_album(title)?;
+                    album_id = Some(id);
+                    created = made;
+                }
+                if let Some(id) = &album_id {
+                    let mut unique = std::collections::HashSet::new();
+                    let keys: Vec<String> = keys
+                        .into_iter()
+                        .filter(|k| unique.insert(k.clone()))
+                        .collect();
+                    client.add_to_album(id, &keys)?;
+                }
+                Ok(())
+            };
+            album_error = add().err().map(|e| format!("{e:#}"));
+        }
+        Ok((album_id, created, album_error))
+    })?;
+    let failed = reports.iter().filter(|r| r.status == "failed").count();
+    let album = (args.album.is_some() || args.album_id.is_some()).then(|| {
+        serde_json::json!({
+            "id": album_id,
+            "title": args.album,
+            "created": album_created,
+            "would_create": args.dry_run && album_id.is_none(),
+            "error": album_error,
+        })
+    });
+    if args.json {
+        print_json(&serde_json::json!({
+            "status": if args.dry_run { "dry_run" } else if failed > 0 { "partial" } else { "done" },
+            "album": album,
+            "files": reports,
+        }))?;
+    } else {
+        for r in &reports {
+            match r.status {
+                "failed" => println!(
+                    "FAILED     {}  {}",
+                    r.path.display(),
+                    r.error.as_deref().unwrap_or("")
+                ),
+                status => println!(
+                    "{:<10} {}  {}  {}",
+                    status,
+                    r.media_key.as_deref().unwrap_or("-"),
+                    r.taken_at.as_deref().unwrap_or("date pending"),
+                    r.path.display()
+                ),
+            }
+        }
+        match (&album_id, &args.album) {
+            (None, Some(title)) if args.dry_run => {
+                println!("Dry run: would create album {title:?}.")
+            }
+            _ if album_error.is_some() => {}
+            (Some(id), _) if args.dry_run => println!("Dry run: would add to album {id}."),
+            (Some(id), title) => println!(
+                "{} album {}{id}.",
+                if album_created {
+                    "Added to new"
+                } else {
+                    "Added to"
+                },
+                title
+                    .as_deref()
+                    .map(|t| format!("{t:?} "))
+                    .unwrap_or_default()
+            ),
+            _ => {}
+        }
+    }
+    if let Some(error) = album_error {
+        bail!("Files were processed, but adding them to the album failed: {error}. Re-run the same command (duplicates are not uploaded again) or use 'album-add'");
+    }
+    if failed > 0 {
+        bail!(
+            "{failed} of {} file(s) failed; the others were processed",
+            reports.len()
+        );
+    }
+    Ok(())
 }
 
 fn run_album_add(mut args: AlbumAddArgs) -> Result<()> {
@@ -882,6 +1255,8 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         })?,
         Command::AlbumAdd(args) => run_album_add(args)?,
+        Command::AlbumCreate(args) => run_album_create(args)?,
+        Command::Upload(args) => run_upload(args)?,
         Command::Tag(args) => {
             client::check_id(&args.id)?;
             with_saved(|client| run_tag(client, &args))?;
