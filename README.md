@@ -270,6 +270,24 @@ Creates an album with that exact title. If exactly one album already has the tit
 that album is reused (JSON `created: false`). If several do, nothing changes. Photo
 IDs given after the name are added to it.
 
+### Rename an album
+
+```bash
+google-photos-web-cli album-rename --album "Family Photos 2026" "Family Photos 2025" --dry-run
+google-photos-web-cli album-rename --album-id ALBUM_ID "Family Photos 2025" --json
+```
+
+The same edit as clicking an album's title on photos.google.com, typing, and pressing
+Done (one `uF3Orb` request). Pick the album by its exact, case-sensitive title
+(`--album`; refused if several albums have it) or by ID (`--album-id`: the ID from
+`albums`, or the one in a `photos.google.com/album/ID` link; `albums --json` shows
+both as `id` and `alt_id`). The rename is refused if another album already has exactly
+the new title, unless `--allow-duplicate`; an album that already has it is left
+unchanged. Afterwards the album list is read again and the command exits 1 if the
+title did not change. Members of a shared album see the new title. There is no undo;
+rename it back to the `old_title` printed (JSON: `status`, `album_id`, `alt_id`,
+`old_title`, `title`).
+
 ### Change when photos were taken
 
 ```bash
@@ -493,7 +511,7 @@ google-photos-web-cli set-date --album "Trip 2026" --date 2026-11-22T10:00 --kee
 
 Exit codes: 0 success, 1 runtime error, 2 bad command line (the error ends with
 a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add`,
-`tag` and `set-date` change your library; preview them with `--dry-run`.
+`album-rename`, `tag` and `set-date` change your library; preview them with `--dry-run`.
 
 | Command | Purpose |
 | --- | --- |
@@ -514,6 +532,7 @@ a pointer to the relevant `--help`). Only `upload`, `album-create`, `album-add`,
 | `albums [--json]` | List albums offered by the Add to album picker |
 | `album-add PHOTO_ID... --album TITLE --yes` | Add photos to an existing album (writes; `--dry-run` available) |
 | `album-create NAME [PHOTO_ID...]` | Create an album, or reuse the one with that exact title (writes; `--dry-run` available) |
+| `album-rename (--album TITLE \| --album-id ID) NEW_TITLE` | Rename an album; refuses ambiguous titles and duplicates, verified by reading back (writes; `--dry-run` available) |
 | `upload FILE... [--album TITLE [--create-album]]` | Upload photos/videos; reports media key and duplicate per file (writes; `--dry-run` available) |
 | `set-date PHOTO_ID... \| --album TITLE (--date DATETIME [--keep-spacing] \| --shift AMOUNT)` | Change capture date/time; verified by reading back (writes; `--dry-run` available) |
 

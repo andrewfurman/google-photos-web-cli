@@ -424,6 +424,17 @@ impl PhotosClient {
         Ok((protocol::created_album_id(&data)?, true))
     }
 
+    /// Rename an album (`uF3Orb`; a write), like editing the title on the album page and
+    /// pressing Done. `album_id` is the album-list row ID. The caller verifies by re-reading.
+    pub fn rename_album(&mut self, album_id: &str, title: &str) -> Result<()> {
+        check_id(album_id).context("Invalid album ID")?;
+        if title.trim().is_empty() {
+            bail!("The new album title cannot be empty");
+        }
+        self.rpc("uF3Orb", protocol::album_rename_payload(album_id, title))?;
+        Ok(())
+    }
+
     /// Every item ID in an album (`snAcKc` pages; read-only), in album order.
     pub fn album_item_ids(&mut self, album_id: &str) -> Result<Vec<String>> {
         check_id(album_id).context("Invalid album ID")?;

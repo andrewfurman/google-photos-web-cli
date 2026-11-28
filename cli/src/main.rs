@@ -40,6 +40,7 @@ COMMANDS:
     upload FILE...          Upload photos/videos from this computer
     album-create NAME       Create an album (or reuse the one with that name)
     album-add PHOTO_ID...   Add photos to an existing album
+    album-rename NEW_TITLE  Rename an album (--album TITLE or --album-id ID)
     tag PHOTO_ID            Tag a detected face with an existing person
     set-date PHOTO_ID...    Change when photos were taken (or a whole --album)
 
@@ -52,6 +53,7 @@ EXAMPLES:
   google-photos-web-cli album-add AF1QipExamplePhotoId --album "Artwork" --dry-run
   google-photos-web-cli upload IMG_0001.jpg clip.mp4 --album "Trip" --create-album
   google-photos-web-cli album-create "Trip 2026" --json
+  google-photos-web-cli album-rename --album "Trip" "Trip 2026" --dry-run
   google-photos-web-cli people --name Jane
   google-photos-web-cli inspect AF1QipExamplePhotoId --json
   google-photos-web-cli download AF1QipExamplePhotoId --dir ./photos
@@ -60,8 +62,8 @@ EXAMPLES:
 
 MORE HELP:  google-photos-web-cli <command> --help   (or: help <command>, e.g. help search)
 OUTPUT:     readable text by default; --json on search, people, inspect, download,
-            albums, album-add, album-create, upload, tag, set-date and auth status.
-SAFETY:     Add --dry-run to preview upload, album-create, album-add, tag, set-date.
+            albums, album-add/-create/-rename, upload, tag, set-date, auth status.
+SAFETY:     Add --dry-run to preview upload, album-create/-add/-rename, tag, set-date.
             Album additions require --yes. Uploads skip files already in the library.
             Downloads never overwrite files. 'auth export' prints credentials:
             treat the result like a password. Sessions can expire or be revoked by
@@ -129,7 +131,7 @@ candidates_checked, complete, stop_reason, and next_page_token.
     Search(SearchArgs),
     /// List albums available in the Google Photos Add to album picker
     #[command(
-        after_help = "Examples:\n  google-photos-web-cli albums\n  google-photos-web-cli albums --json\n\nRead-only. Use an ID with 'album-add --album-id'."
+        after_help = "Examples:\n  google-photos-web-cli albums\n  google-photos-web-cli albums --json\n\nRead-only. Use an ID with 'album-add --album-id'.\nJSON adds alt_id when Google gives an album a second ID (as in its /album/ID link)."
     )]
     Albums {
         /// Print machine-readable JSON with album IDs and titles
@@ -158,6 +160,22 @@ case-sensitive title it is reused; if several do, nothing changes.
 Photo IDs come from 'search' or 'upload'. JSON reports album_id, title,
 created (true/false) and the added photo_ids."#)]
     AlbumCreate(AlbumCreateArgs),
+    /// Rename an album, like editing its title on photos.google.com (writes to your library)
+    #[command(after_help = r#"Examples:
+  google-photos-web-cli album-rename --album "Family Photos 2026" "Family Photos 2025" --dry-run
+  google-photos-web-cli album-rename --album-id ALBUM_ID "Family Photos 2025"
+  google-photos-web-cli album-rename --album-id ALBUM_ID "Trip" --allow-duplicate --json
+
+WRITES to your library unless --dry-run (this CLI has no undo; rename back to
+the old title printed here). Choose the album with --album (exact,
+case-sensitive title; refused if several albums have it) or --album-id (an ID
+from 'albums', or the ID in a photos.google.com/album/ID link).
+Refused if another album already has exactly NEW_TITLE, unless
+--allow-duplicate. An album that already has NEW_TITLE is left unchanged.
+After renaming, the album list is read again and the new title checked;
+exit 1 if it did not change. Members of a shared album see the new title.
+JSON reports status (renamed, unchanged, dry_run), album_id, old_title, title."#)]
+    AlbumRename(AlbumRenameArgs),
     /// Upload photos and videos from this computer to your library (writes to your library)
     #[command(after_help = r#"Examples:
   google-photos-web-cli upload IMG_0001.jpg --dry-run
@@ -442,6 +460,98 @@ struct AlbumCreateArgs {
     /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+#[command(group = clap::ArgGroup::new("album_target").required(true).args(["album", "album_id"]))]
+struct AlbumRenameArgs {
+    /// The album's new title (used exactly as given)
+    new_title: String,
+    /// Exact, case-sensitive current title of a uniquely named album
+    #[arg(long)]
+    album: Option<String>,
+    /// Album ID from 'albums' (or from a photos.google.com/album/ID link)
+    #[arg(long)]
+    album_id: Option<String>,
+    /// Rename even if another album already has NEW_TITLE
+    #[arg(long)]
+    allow_duplicate: bool,
+    /// Show the album and the old and new titles; change nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_album_rename(args: AlbumRenameArgs) -> Result<()> {
+    use google_photos_web_cli::protocol::{plan_album_rename, AlbumTarget};
+    if args.new_title.trim().is_empty() {
+        bail!("The new album title cannot be empty");
+    }
+    if let Some(id) = &args.album_id {
+        client::check_id(id).context("Invalid album ID")?;
+    }
+    let target = match (&args.album_id, &args.album) {
+        (Some(id), _) => AlbumTarget::Id(id),
+        (None, Some(title)) => AlbumTarget::Title(title),
+        (None, None) => bail!("Choose --album or --album-id"),
+    };
+    let new_title = args.new_title.as_str();
+    let (album, status) = with_saved(|client| {
+        let album = plan_album_rename(&client.albums()?, target, new_title, args.allow_duplicate)?;
+        if album.title.as_deref() == Some(new_title) {
+            return Ok((album, "unchanged"));
+        }
+        if args.dry_run {
+            return Ok((album, "dry_run"));
+        }
+        client.rename_album(&album.id, new_title)?;
+        let now = client
+            .albums()?
+            .into_iter()
+            .find(|a| a.id == album.id)
+            .with_context(|| {
+                format!(
+                    "Album {} is missing from 'albums' after the rename; check it in the browser",
+                    album.id
+                )
+            })?;
+        if now.title.as_deref() != Some(new_title) {
+            bail!(
+                "Google Photos accepted the request, but album {} is still titled {:?}, not {new_title:?}",
+                album.id,
+                now.title.as_deref().unwrap_or("(untitled)")
+            );
+        }
+        Ok((album, "renamed"))
+    })?;
+    let old = album.title.as_deref();
+    if args.json {
+        return print_json(&serde_json::json!({
+            "status": status,
+            "album_id": album.id,
+            "alt_id": album.alt_id,
+            "old_title": old,
+            "title": new_title,
+        }));
+    }
+    let old = old.map_or("(untitled)".to_owned(), |t| format!("{t:?}"));
+    match status {
+        "unchanged" => println!(
+            "Album {} is already titled {new_title:?}; nothing changed.",
+            album.id
+        ),
+        "dry_run" => println!(
+            "Dry run: would rename album {} from {old} to {new_title:?}.",
+            album.id
+        ),
+        _ => println!(
+            "Renamed album {} from {old} to {new_title:?} (checked in the album list).",
+            album.id
+        ),
+    }
+    Ok(())
 }
 
 fn run_album_create(mut args: AlbumCreateArgs) -> Result<()> {
@@ -1475,6 +1585,7 @@ fn run(cli: Cli) -> Result<()> {
         })?,
         Command::AlbumAdd(args) => run_album_add(args)?,
         Command::AlbumCreate(args) => run_album_create(args)?,
+        Command::AlbumRename(args) => run_album_rename(args)?,
         Command::Upload(args) => run_upload(args)?,
         Command::SetDate(args) => run_set_date(args)?,
         Command::Tag(args) => {
@@ -1808,6 +1919,56 @@ mod argument_tests {
             panic!("wrong command")
         };
         assert_eq!(args.query.as_deref(), Some(query));
+    }
+
+    #[test]
+    fn album_rename_takes_one_target_and_the_new_title() {
+        let cli = Cli::try_parse_from([
+            "google-photos-web-cli",
+            "album-rename",
+            "--album-id",
+            "AF1QipSyntheticAlbum",
+            "Family Photos 2025",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        let Command::AlbumRename(args) = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(args.album_id.as_deref(), Some("AF1QipSyntheticAlbum"));
+        assert_eq!(args.new_title, "Family Photos 2025");
+        assert!(args.dry_run && args.json && !args.allow_duplicate && args.album.is_none());
+        let cli = Cli::try_parse_from([
+            "google-photos-web-cli",
+            "album-rename",
+            "--album",
+            "Old",
+            "New",
+            "--allow-duplicate",
+        ])
+        .unwrap();
+        let Command::AlbumRename(args) = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(args.album.as_deref(), Some("Old"));
+        assert!(args.allow_duplicate);
+        for bad in [
+            vec!["album-rename", "New"],
+            vec!["album-rename", "--album", "Old"],
+            vec![
+                "album-rename",
+                "--album",
+                "Old",
+                "--album-id",
+                "AF1QipX",
+                "New",
+            ],
+            vec!["album-rename", "--album", "Old", "New", "Extra"],
+        ] {
+            let argv = std::iter::once("google-photos-web-cli").chain(bad.clone());
+            assert!(Cli::try_parse_from(argv).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

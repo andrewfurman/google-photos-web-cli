@@ -24,6 +24,7 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         "--from",
         "upload FILE...",
         "album-create NAME",
+        "album-rename NEW_TITLE",
         "set-date PHOTO_ID...",
         "--keep-spacing",
     ] {
@@ -38,6 +39,8 @@ fn help_explains_auth_search_download_and_refresh_without_authenticating() {
         vec!["albums", "--help"],
         vec!["album-add", "--help"],
         vec!["album-create", "--help"],
+        vec!["album-rename", "--help"],
+        vec!["help", "album-rename"],
         vec!["upload", "--help"],
         vec!["help", "upload"],
         vec!["set-date", "--help"],
@@ -91,6 +94,18 @@ fn invalid_inputs_fail_before_accessing_keychain() {
         vec!["upload", "a.jpg", "--album-id", "../../secret"],
         vec!["album-create"],
         vec!["album-create", "Trip", "../../secret"],
+        vec!["album-rename", "New"],
+        vec!["album-rename", "--album", "Old"],
+        vec![
+            "album-rename",
+            "--album",
+            "Old",
+            "--album-id",
+            "AF1QipX",
+            "New",
+        ],
+        vec!["album-rename", "--album-id", "../../secret", "New"],
+        vec!["album-rename", "--album", "Old", "  "],
         vec!["set-date", "AF1QipSyntheticPhoto"],
         vec!["set-date", "--date", "2026-11-22"],
         vec![
@@ -273,6 +288,19 @@ fn detailed_help_documents_filters_pagination_metadata_and_session_refresh() {
             ],
         ),
         (
+            vec!["help", "album-rename"],
+            vec![
+                "Examples:",
+                "google-photos-web-cli album-rename --album \"Family Photos 2026\" \"Family Photos 2025\" --dry-run",
+                "google-photos-web-cli album-rename --album-id ALBUM_ID",
+                "WRITES",
+                "case-sensitive",
+                "several albums",
+                "--allow-duplicate",
+                "exit 1",
+            ],
+        ),
+        (
             vec!["help", "auth"],
             vec![
                 "No single guaranteed expiry",
@@ -371,6 +399,13 @@ fn upload_and_album_create_are_listed_as_writes_and_document_every_flag() {
     let writes = writes.split("EXAMPLES:").next().unwrap();
     assert!(writes.contains("upload FILE..."));
     assert!(writes.contains("album-create NAME"));
+    assert!(writes.contains("album-rename NEW_TITLE"));
+    let reads = text
+        .split("Read (never changes your library)")
+        .nth(1)
+        .unwrap();
+    let reads = reads.split("Change (writes").next().unwrap();
+    assert!(!reads.contains("album-rename"));
     for (command, flags) in [
         (
             "upload",
@@ -383,6 +418,18 @@ fn upload_and_album_create_are_listed_as_writes_and_document_every_flag() {
             ],
         ),
         ("album-create", vec!["--dry-run", "--json"]),
+        (
+            "album-rename",
+            vec![
+                "<NEW_TITLE>",
+                "--album <ALBUM>",
+                "--album-id <ALBUM_ID>",
+                "--allow-duplicate",
+                "--dry-run",
+                "--json",
+                "--session-file",
+            ],
+        ),
     ] {
         let help =
             String::from_utf8(bin().args([command, "--help"]).output().unwrap().stdout).unwrap();
@@ -407,5 +454,24 @@ fn upload_rejects_missing_and_non_media_files_before_signing_in() {
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(1));
+    }
+}
+
+#[test]
+fn album_rename_rejects_bad_input_before_reading_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["album-rename", "--album-id", "../../secret", "New"],
+        vec!["album-rename", "--album", "Old", ""],
+    ] {
+        let out = bin()
+            .env("GPHOTOS_SESSION_FILE", dir.path().join("none.env"))
+            .env_remove("GPHOTOS_SESSION")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(!err.contains("session file"), "{args:?}: {err}");
     }
 }
