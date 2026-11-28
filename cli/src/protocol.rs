@@ -287,10 +287,35 @@ pub struct Location {
     pub longitude: Option<f64>,
     pub labels: Vec<String>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Album {
     pub id: String,
     pub title: Option<String>,
+    /// A second ID Google gives some albums (seen on shared ones): the key in a
+    /// `photos.google.com/album/ID` URL when that differs from `id`. Either one names the album.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_id: Option<String>,
+}
+impl Album {
+    /// True when `id` is this album's ID or its alternate ID.
+    pub fn has_id(&self, id: &str) -> bool {
+        self.id == id || self.alt_id.as_deref() == Some(id)
+    }
+}
+/// The trailing `{"72930366": [kind, title, …]}` metadata object of an album row, if any.
+fn album_meta(row: &Value) -> Option<&Value> {
+    row.as_array()?
+        .iter()
+        .rev()
+        .find_map(|item| item.as_object()?.values().next())
+}
+/// Alternate album ID at metadata `[8]` (Nov 2026), when it differs from the row ID.
+fn album_alt_id(row: &Value, id: &str) -> Option<String> {
+    album_meta(row)?
+        .get(8)?
+        .as_str()
+        .filter(|alt| *alt != id && crate::client::check_id(alt).is_ok())
+        .map(str::to_owned)
 }
 /// Album title. Since Nov 2026 Google puts it in a trailing `{"72930366": [kind, title, ...]}` object and
 /// `row[1][0]` holds the cover photo URL; older responses had the title at `row[1][0]`.
@@ -326,6 +351,7 @@ pub(crate) fn parse_album_page(data: &Value) -> Result<(Vec<Album>, Option<Strin
                 Ok(Album {
                     id: id.to_owned(),
                     title: album_title(row),
+                    alt_id: album_alt_id(row, id),
                 })
             })
             .collect::<Result<_>>()?,
@@ -348,6 +374,61 @@ pub(crate) fn owned_album_add_payload(album_id: &str, photo_ids: &[String]) -> V
 /// `OXvT9d`: create an empty album (GPTK `createAlbum`).
 pub(crate) fn album_create_payload(title: &str) -> Value {
     json!([title, null, 2])
+}
+
+/// `uF3Orb`: rename an album, as the web app sends it when you edit the title and press Done.
+pub(crate) fn album_rename_payload(album_id: &str, title: &str) -> Value {
+    json!([[album_id], title])
+}
+
+/// Which album `album-rename` changes: by ID (row or alternate ID) or by exact title.
+pub enum AlbumTarget<'a> {
+    Id(&'a str),
+    Title(&'a str),
+}
+
+/// Pick the album to rename and check the new title, before anything is written.
+/// Refuses an ambiguous title, an unknown album, an empty title, and (unless
+/// `allow_duplicate`) a title another album already has. Returns the album as listed.
+pub fn plan_album_rename(
+    albums: &[Album],
+    target: AlbumTarget,
+    new_title: &str,
+    allow_duplicate: bool,
+) -> Result<Album> {
+    if new_title.trim().is_empty() {
+        bail!("The new album title cannot be empty");
+    }
+    let album = match target {
+        AlbumTarget::Id(id) => albums
+            .iter()
+            .find(|album| album.has_id(id))
+            .with_context(|| format!("No album with ID {id} in 'albums'"))?,
+        AlbumTarget::Title(title) => {
+            let mut matches = albums
+                .iter()
+                .filter(|album| album.title.as_deref() == Some(title));
+            let album = matches
+                .next()
+                .with_context(|| format!("No album titled {title:?} in 'albums'"))?;
+            if matches.next().is_some() {
+                bail!("More than one album is titled {title:?}. Run 'albums' and use --album-id");
+            }
+            album
+        }
+    };
+    if !allow_duplicate {
+        if let Some(other) = albums
+            .iter()
+            .find(|other| other.id != album.id && other.title.as_deref() == Some(new_title))
+        {
+            bail!(
+                "Album {} is already titled {new_title:?}; nothing changed. Add --allow-duplicate to use the same title anyway",
+                other.id
+            );
+        }
+    }
+    Ok(album.clone())
 }
 
 /// `OXvT9d` answers with the new album's ID at `[0][0]`.
@@ -621,6 +702,7 @@ pub fn parse_inspection(ext: &Value, info: &Value, id: &str, account: u32) -> Re
                 albums.push(Album {
                     id,
                     title: string(field(extension(row, "72930366"), 1)),
+                    alt_id: None,
                 });
             }
         }
@@ -1229,6 +1311,127 @@ mod album_tests {
         ]);
         assert!(confirm_album_add(&owned, &ids).is_ok());
         assert!(confirm_album_add(&owned, &["AF1QipThirdPhoto".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn album_rows_expose_the_alternate_id_used_by_album_urls() {
+        let (albums, _) = parse_album_page(&json!([[
+            ["AF1QipShareKey", ["https://cover"], null, null, null, null, ["AF1QipOwner"], [], null, null, [],
+             {"72930366": [4, "Family Photos 2026", [], 24, true, "key", [1], [], "AF1QipLibraryKey", null, "https://link"]}],
+            ["AF1QipPlain", ["https://cover"], {"72930366": [4, "Plain", [], 3, true, null, [1], [], null]}],
+            ["AF1QipSame", ["https://cover"], {"72930366": [4, "Same", [], 3, true, null, [1], [], "AF1QipSame"]}],
+            ["AF1QipBadAlt", ["https://cover"], {"72930366": [4, "Bad", [], 3, true, null, [1], [], "../x"]}]
+        ], null]))
+        .unwrap();
+        assert_eq!(albums[0].alt_id.as_deref(), Some("AF1QipLibraryKey"));
+        assert!(albums[0].has_id("AF1QipShareKey") && albums[0].has_id("AF1QipLibraryKey"));
+        assert!(!albums[0].has_id("AF1QipPlain"));
+        assert_eq!(albums[1].alt_id, None);
+        assert_eq!(
+            albums[2].alt_id, None,
+            "an alternate equal to the ID is not repeated"
+        );
+        assert_eq!(albums[3].alt_id, None, "an invalid alternate ID is ignored");
+        let json = serde_json::to_value(&albums).unwrap();
+        assert_eq!(json[0]["alt_id"], "AF1QipLibraryKey");
+        assert!(json[1].get("alt_id").is_none());
+    }
+
+    fn album(id: &str, title: Option<&str>, alt: Option<&str>) -> Album {
+        Album {
+            id: id.into(),
+            title: title.map(Into::into),
+            alt_id: alt.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn album_rename_matches_web_app() {
+        assert_eq!(
+            album_rename_payload("AF1QipExampleAlbum", "Family Photos 2025").to_string(),
+            r#"[["AF1QipExampleAlbum"],"Family Photos 2025"]"#
+        );
+        assert_eq!(
+            album_rename_payload("AF1QipExampleAlbum", "Quote \" ’").to_string(),
+            r#"[["AF1QipExampleAlbum"],"Quote \" ’"]"#
+        );
+    }
+
+    #[test]
+    fn album_rename_plan_refuses_ambiguity_unknown_albums_and_duplicates() {
+        let albums = vec![
+            album(
+                "AF1QipShared",
+                Some("Family Photos 2026"),
+                Some("AF1QipLibrary"),
+            ),
+            album("AF1QipTwinA", Some("Twin"), None),
+            album("AF1QipTwinB", Some("Twin"), None),
+            album("AF1QipTaken", Some("Family Photos 2025"), None),
+            album("AF1QipUntitled", None, None),
+        ];
+        // By either ID, and by a unique title.
+        for target in [
+            AlbumTarget::Id("AF1QipShared"),
+            AlbumTarget::Id("AF1QipLibrary"),
+            AlbumTarget::Title("Family Photos 2026"),
+        ] {
+            let picked = plan_album_rename(&albums, target, "New", false).unwrap();
+            assert_eq!(picked.id, "AF1QipShared");
+        }
+        // Several albums share the title: refused.
+        let err = plan_album_rename(&albums, AlbumTarget::Title("Twin"), "New", false).unwrap_err();
+        assert!(err.to_string().contains("More than one album"), "{err}");
+        // Titles match exactly and case-sensitively.
+        assert!(plan_album_rename(
+            &albums,
+            AlbumTarget::Title("family photos 2026"),
+            "New",
+            false
+        )
+        .is_err());
+        assert!(
+            plan_album_rename(&albums, AlbumTarget::Id("AF1QipMissing"), "New", false).is_err()
+        );
+        // Another album already has the new title: refused unless allowed.
+        let err = plan_album_rename(
+            &albums,
+            AlbumTarget::Id("AF1QipShared"),
+            "Family Photos 2025",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--allow-duplicate"), "{err}");
+        assert!(plan_album_rename(
+            &albums,
+            AlbumTarget::Id("AF1QipShared"),
+            "Family Photos 2025",
+            true
+        )
+        .is_ok());
+        // A near miss is not a duplicate.
+        assert!(plan_album_rename(
+            &albums,
+            AlbumTarget::Id("AF1QipShared"),
+            "Family Photos 2025 ",
+            false
+        )
+        .is_ok());
+        // An album's own current title is not a duplicate (the caller reports "unchanged"),
+        // but a twin with that title still is.
+        assert!(plan_album_rename(
+            &albums,
+            AlbumTarget::Id("AF1QipShared"),
+            "Family Photos 2026",
+            false
+        )
+        .is_ok());
+        assert!(plan_album_rename(&albums, AlbumTarget::Id("AF1QipTwinA"), "Twin", false).is_err());
+        // Untitled albums can be renamed by ID; empty titles are refused.
+        assert!(
+            plan_album_rename(&albums, AlbumTarget::Id("AF1QipUntitled"), "Named", false).is_ok()
+        );
+        assert!(plan_album_rename(&albums, AlbumTarget::Id("AF1QipShared"), "  ", false).is_err());
     }
 
     #[test]
